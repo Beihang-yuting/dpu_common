@@ -39,6 +39,17 @@ typedef struct { int unsigned host_id; int unsigned segment_id; }
     dpu_pcie_domain_key_t;
 typedef struct { dpu_pcie_domain_key_t domain; bit [15:0] bdf; }
     dpu_pcie_function_id_t;
+// Host 信息是 DPU 逻辑地址域的描述，不表示任何 PCIe 物理角色。
+// 快照会按值复制该结构，因而调用方不能通过查询结果修改原始配置。
+typedef struct {
+    int unsigned host_id;
+    bit enabled;
+    string name;
+    int unsigned address_width;
+    bit has_gpa_aperture;
+    bit [63:0] gpa_base;
+    bit [63:0] gpa_limit;
+} dpu_host_info_t;
 typedef struct {
     dpu_function_key_t function_key;
     dpu_service_kind_e service_kind;
@@ -77,6 +88,10 @@ function automatic string dpu_pcie_domain_key_name(
     input dpu_pcie_domain_key_t key
 );
     return $sformatf("h%0d.s%0d", key.host_id, key.segment_id);
+endfunction
+
+function automatic string dpu_host_key_name(input int unsigned host_id);
+    return $sformatf("h%0d", host_id);
 endfunction
 
 function automatic string dpu_pcie_function_id_name(

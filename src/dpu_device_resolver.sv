@@ -327,6 +327,17 @@ class dpu_device_resolver extends uvm_object;
                 why = $sformatf("host key exceeds DUT capability %s", key_name);
                 return 0;
             end
+            if ((cfg.hosts[host_index].address_width == 0) ||
+                (cfg.hosts[host_index].address_width > 64)) begin
+                why = {"invalid address width for Host ", key_name};
+                return 0;
+            end
+            if (cfg.hosts[host_index].has_gpa_aperture &&
+                (cfg.hosts[host_index].gpa_base >=
+                 cfg.hosts[host_index].gpa_limit)) begin
+                why = {"invalid GPA aperture for Host ", key_name};
+                return 0;
+            end
             foreach (cfg.hosts[host_index].pcie_domains[domain_index]) begin
                 dpu_pcie_domain_cfg domain;
 
@@ -911,6 +922,20 @@ class dpu_device_resolver extends uvm_object;
             {get_name(), "_candidate_snapshot"});
         if (!candidate_snapshot.set_dut_caps(workspace.dut_caps, why))
             return 0;
+        foreach (workspace.hosts[host_index]) begin
+            dpu_host_info_t host_info;
+
+            host_info.host_id = workspace.hosts[host_index].host_id;
+            host_info.enabled = workspace.hosts[host_index].enabled;
+            host_info.name = workspace.hosts[host_index].name;
+            host_info.address_width = workspace.hosts[host_index].address_width;
+            host_info.has_gpa_aperture =
+                workspace.hosts[host_index].has_gpa_aperture;
+            host_info.gpa_base = workspace.hosts[host_index].gpa_base;
+            host_info.gpa_limit = workspace.hosts[host_index].gpa_limit;
+            if (!candidate_snapshot.add_host(host_info, why))
+                return 0;
+        end
         foreach (functions[index]) begin
             string function_name;
 

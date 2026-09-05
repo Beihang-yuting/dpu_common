@@ -414,6 +414,81 @@ class dpu_device_resolver_test extends uvm_test;
         return cfg;
     endfunction
 
+    // Host 属性属于 DPU 逻辑配置：它们不携带 RC/EP/Switch 等物理角色，
+    // 但必须能够随解析结果一起冻结，供后续适配层只读查询。
+    function void test_host_properties_are_frozen_and_queryable(
+        input dpu_device_resolver resolver
+    );
+        dpu_device_cfg cfg;
+        dpu_device_snapshot snapshot;
+        dpu_host_info_t hosts[$];
+        dpu_host_info_t host;
+        string why;
+
+        cfg = make_valid_cfg();
+        cfg.hosts[0].enabled = 1'b1;
+        cfg.hosts[0].name = "host_fabric_a";
+        cfg.hosts[0].address_width = 48;
+        cfg.hosts[0].has_gpa_aperture = 1'b1;
+        cfg.hosts[0].gpa_base = 64'h0000_0000_1000_0000;
+        cfg.hosts[0].gpa_limit = 64'h0000_0000_2000_0000;
+        cfg.hosts[1].enabled = 1'b0;
+        cfg.hosts[1].name = "host_fabric_b";
+        cfg.hosts[1].address_width = 52;
+        cfg.hosts[1].has_gpa_aperture = 1'b1;
+        cfg.hosts[1].gpa_base = 64'h0000_0010_0000_0000;
+        cfg.hosts[1].gpa_limit = 64'h0000_0020_0000_0000;
+
+        expect_resolved(resolver, cfg, snapshot);
+        if ((snapshot.host_count() != 2) ||
+            (snapshot.enabled_host_count() != 1))
+            `uvm_fatal("RESOLVER_TEST", "snapshot Host counts are incorrect")
+
+        snapshot.list_hosts(hosts);
+        if (hosts.size() != 2)
+            `uvm_fatal("RESOLVER_TEST", "snapshot omitted a configured Host")
+        if ((hosts[0].host_id != 0) || (hosts[0].name != "host_fabric_a") ||
+            (hosts[0].address_width != 48) || !hosts[0].enabled ||
+            !hosts[0].has_gpa_aperture ||
+            (hosts[0].gpa_base != 64'h0000_0000_1000_0000) ||
+            (hosts[0].gpa_limit != 64'h0000_0000_2000_0000))
+            `uvm_fatal("RESOLVER_TEST", "enabled Host properties were not frozen")
+        if ((hosts[1].host_id != 1) || (hosts[1].name != "host_fabric_b") ||
+            (hosts[1].address_width != 52) || hosts[1].enabled)
+            `uvm_fatal("RESOLVER_TEST", "disabled Host properties were not frozen")
+
+        if (!snapshot.lookup_host(1, host, why) ||
+            (host.name != "host_fabric_b") || host.enabled)
+            `uvm_fatal("RESOLVER_TEST", {"Host lookup failed: ", why})
+
+        // list_hosts() 返回值必须是快照副本，调用方修改它不能回写冻结状态。
+        hosts[0].name = "caller_mutation";
+        hosts.delete();
+        if (!snapshot.lookup_host(0, host, why) ||
+            (host.name != "host_fabric_a"))
+            `uvm_fatal("RESOLVER_TEST", "Host query returned mutable snapshot state")
+    endfunction
+
+    function void test_host_address_constraints(
+        input dpu_device_resolver resolver
+    );
+        dpu_device_cfg cfg;
+
+        cfg = make_valid_cfg();
+        cfg.hosts[0].address_width = 0;
+        expect_invalid(resolver, cfg, "invalid address width");
+
+        cfg = make_valid_cfg();
+        cfg.hosts[0].address_width = 65;
+        expect_invalid(resolver, cfg, "invalid address width");
+
+        cfg = make_valid_cfg();
+        cfg.hosts[0].has_gpa_aperture = 1'b1;
+        cfg.hosts[0].gpa_base = 64'h0000_0000_2000_0000;
+        cfg.hosts[0].gpa_limit = 64'h0000_0000_1000_0000;
+        expect_invalid(resolver, cfg, "invalid GPA aperture");
+    endfunction
+
     function automatic dpu_device_cfg clone_cfg(input dpu_device_cfg source);
         dpu_device_cfg clone;
 
@@ -1547,6 +1622,8 @@ class dpu_device_resolver_test extends uvm_test;
         phase.raise_objection(this);
         resolver = dpu_device_resolver::type_id::create("resolver");
         test_valid_sparse_config(resolver);
+        test_host_properties_are_frozen_and_queryable(resolver);
+        test_host_address_constraints(resolver);
         test_real_dut_bar_profile_literals(resolver);
         test_copy_from_is_deep(resolver);
         test_duplicate_host_key(resolver);

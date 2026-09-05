@@ -21,7 +21,9 @@ class dpu_device_snapshot extends uvm_object;
     protected dpu_function_key_t m_bar_functions[string];
     protected dpu_service_key_t m_services[string];
     protected dpu_function_key_t m_service_owners[string];
+    protected dpu_host_info_t m_hosts[string];
     protected dpu_function_key_t m_expected_af;
+    protected string m_host_order[$];
     protected string m_function_order[$];
     protected string m_bar_order[$];
     protected string m_service_order[$];
@@ -45,6 +47,13 @@ class dpu_device_snapshot extends uvm_object;
         if (lhs.kind != rhs.kind)
             return lhs.kind < rhs.kind;
         return lhs.vf_id < rhs.vf_id;
+    endfunction
+
+    protected function bit host_less(
+        input dpu_host_info_t lhs,
+        input dpu_host_info_t rhs
+    );
+        return lhs.host_id < rhs.host_id;
     endfunction
 
     protected function bit service_less(
@@ -118,6 +127,38 @@ class dpu_device_snapshot extends uvm_object;
         m_dut_caps = dpu_dut_caps::type_id::create({get_name(), "_caps"});
         m_dut_caps.copy_from(caps);
         m_has_caps = 1;
+        return 1;
+    endfunction
+
+    // 添加一个 Host 的值副本。Host ID 是快照中的稳定索引；空名称派生为
+    // host_<id>，保证查询结果始终具有人类可读名称。
+    function bit add_host(
+        input dpu_host_info_t host,
+        output string why
+    );
+        string host_name;
+        dpu_host_info_t stored_host;
+
+        if (!mutable(why))
+            return 0;
+        host_name = dpu_host_key_name(host.host_id);
+        if (m_hosts.exists(host_name)) begin
+            why = {"snapshot duplicate Host ", host_name};
+            return 0;
+        end
+        if ((host.address_width == 0) || (host.address_width > 64)) begin
+            why = {"snapshot invalid address width for Host ", host_name};
+            return 0;
+        end
+        if (host.has_gpa_aperture && (host.gpa_base >= host.gpa_limit)) begin
+            why = {"snapshot invalid GPA aperture for Host ", host_name};
+            return 0;
+        end
+        stored_host = host;
+        if (stored_host.name.len() == 0)
+            stored_host.name = $sformatf("host_%0d", host.host_id);
+        m_hosts[host_name] = stored_host;
+        m_host_order.push_back(host_name);
         return 1;
     endfunction
 
@@ -244,6 +285,16 @@ class dpu_device_snapshot extends uvm_object;
     protected function void sort_indexes();
         string swap_name;
 
+        for (int left = 0; left < m_host_order.size(); left++) begin
+            for (int right = left + 1; right < m_host_order.size(); right++) begin
+                if (host_less(m_hosts[m_host_order[right]],
+                              m_hosts[m_host_order[left]])) begin
+                    swap_name = m_host_order[left];
+                    m_host_order[left] = m_host_order[right];
+                    m_host_order[right] = swap_name;
+                end
+            end
+        end
         for (int left = 0; left < m_function_order.size(); left++) begin
             for (int right = left + 1; right < m_function_order.size(); right++) begin
                 if (function_less(m_functions[m_function_order[right]],
@@ -302,6 +353,24 @@ class dpu_device_snapshot extends uvm_object;
         if (!m_has_expected_af) begin
             why = "snapshot has no expected AF";
             return 0;
+        end
+        if (m_host_order.size() != m_hosts.num()) begin
+            why = "snapshot Host index cardinality mismatch";
+            return 0;
+        end
+        foreach (m_host_order[index]) begin
+            string host_name;
+
+            host_name = m_host_order[index];
+            if (!m_hosts.exists(host_name) ||
+                (dpu_host_key_name(m_hosts[host_name].host_id) != host_name) ||
+                (m_hosts[host_name].address_width == 0) ||
+                (m_hosts[host_name].address_width > 64) ||
+                (m_hosts[host_name].has_gpa_aperture &&
+                 (m_hosts[host_name].gpa_base >= m_hosts[host_name].gpa_limit))) begin
+                why = {"snapshot Host properties are invalid ", host_name};
+                return 0;
+            end
         end
         if ((m_function_order.size() != m_functions.num()) ||
             (m_pcie_ids.num() != m_functions.num()) ||
@@ -656,6 +725,62 @@ class dpu_device_snapshot extends uvm_object;
         end
         owner = m_service_owners[service_name];
         return 1;
+    endfunction
+
+    // 返回冻结快照中的 Host 总数；未冻结时不暴露配置内容。
+    function int unsigned host_count();
+        if (!m_frozen)
+            return 0;
+        return m_host_order.size();
+    endfunction
+
+    // 返回 enabled Host 数量。数量始终从冻结后的 Host 数组派生，避免
+    // 引入一个可能与动态配置数组不一致的独立 num_hosts 字段。
+    function int unsigned enabled_host_count();
+        int unsigned count;
+
+        count = 0;
+        if (!m_frozen)
+            return count;
+        foreach (m_host_order[index]) begin
+            if (m_hosts[m_host_order[index]].enabled)
+                count++;
+        end
+        return count;
+    endfunction
+
+    function bit lookup_host(
+        input int unsigned host_id,
+        output dpu_host_info_t host,
+        output string why
+    );
+        string host_name;
+
+        host.host_id = 0;
+        host.enabled = 0;
+        host.name = "";
+        host.address_width = 0;
+        host.has_gpa_aperture = 0;
+        host.gpa_base = '0;
+        host.gpa_limit = '0;
+        if (!queryable(why))
+            return 0;
+        host_name = dpu_host_key_name(host_id);
+        if (!m_hosts.exists(host_name)) begin
+            why = {"unknown snapshot Host ", host_name};
+            return 0;
+        end
+        host = m_hosts[host_name];
+        why = "";
+        return 1;
+    endfunction
+
+    function void list_hosts(ref dpu_host_info_t hosts[$]);
+        hosts.delete();
+        if (!m_frozen)
+            return;
+        foreach (m_host_order[index])
+            hosts.push_back(m_hosts[m_host_order[index]]);
     endfunction
 
     function void list_functions(ref dpu_function_key_t keys[$]);

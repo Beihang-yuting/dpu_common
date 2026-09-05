@@ -94,17 +94,36 @@ class dpu_host_cfg extends uvm_object;
     `uvm_object_utils(dpu_host_cfg)
 
     int unsigned host_id;
+    // Host 开关和名称只描述逻辑配置，物理 PCIe 角色由上层适配层决定。
+    bit enabled;
+    string name;
+    int unsigned address_width;
+    bit has_gpa_aperture;
+    bit [63:0] gpa_base;
+    bit [63:0] gpa_limit;
     dpu_pcie_domain_cfg pcie_domains[$];
 
     function new(string name = "dpu_host_cfg");
         super.new(name);
         host_id = 0;
+        enabled = 1'b1;
+        this.name = "";
+        address_width = 64;
+        has_gpa_aperture = 1'b0;
+        gpa_base = '0;
+        gpa_limit = '0;
     endfunction
 
     function void copy_from(input dpu_host_cfg rhs);
         dpu_pcie_domain_cfg domain_copy;
 
         host_id = rhs.host_id;
+        enabled = rhs.enabled;
+        name = rhs.name;
+        address_width = rhs.address_width;
+        has_gpa_aperture = rhs.has_gpa_aperture;
+        gpa_base = rhs.gpa_base;
+        gpa_limit = rhs.gpa_limit;
         pcie_domains.delete();
         foreach (rhs.pcie_domains[index]) begin
             if (rhs.pcie_domains[index] == null) begin
