@@ -1341,18 +1341,29 @@ class dpu_device_resolver_test extends uvm_test;
             (af_bar0.even_bar_id != 0))
             `uvm_fatal("RESOLVER_TEST", "expected AF query mismatch")
 
+        // BAR 布局由放置器决定（现按 size 降序先放大块），测试不锚定
+        // 具体地址字面值，而是检查规范角色顺序、对齐与窗口归属；防御
+        // 性拷贝检查改用查询到的实际基址做对比。
         if (!snapshot.list_bars(cfg.functions[3].key, bars, why) ||
             (bars.size() != 3) ||
             (bars[0].role != DPU_BAR_DEVICE_MEMORY) ||
             (bars[1].role != DPU_BAR_MAILBOX) ||
             (bars[2].role != DPU_BAR_MSIX) ||
-            (bars[0].base != 64'h0000_0001_0204_0000))
-            `uvm_fatal("RESOLVER_TEST", "BAR list is not canonical or literal")
-        bars[0].base = '0;
-        if (!snapshot.get_bar(cfg.functions[3].key, DPU_BAR_DEVICE_MEMORY,
-                              stored_bar, why) ||
-            (stored_bar.base != 64'h0000_0001_0204_0000))
-            `uvm_fatal("RESOLVER_TEST", "snapshot BAR list was not defensive")
+            ((bars[0].base % bars[0].size) != 0) ||
+            (bars[0].base < 64'h0000_0001_0000_0000) ||
+            ((bars[0].base + bars[0].size) > 64'h0000_0002_0000_0000))
+            `uvm_fatal("RESOLVER_TEST", "BAR list is not canonical or placed")
+        begin
+            bit [63:0] listed_base;
+
+            listed_base = bars[0].base;
+            bars[0].base = '0;
+            if (!snapshot.get_bar(cfg.functions[3].key,
+                                  DPU_BAR_DEVICE_MEMORY, stored_bar, why) ||
+                (stored_bar.base != listed_base))
+                `uvm_fatal("RESOLVER_TEST",
+                           "snapshot BAR list was not defensive")
+        end
 
         caps_copy = snapshot.snapshot_dut_caps();
         caps_copy.max_hosts = 4;

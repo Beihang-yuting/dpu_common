@@ -74,6 +74,18 @@ class dpu_device_resolver extends uvm_object;
         input dpu_bar_work_item_t lhs,
         input dpu_bar_work_item_t rhs
     );
+        // size 降序是第一排序键：大 BAR 先放置。否则随机放置策略撒下
+        // 的小 BAR 会击穿大 BAR 需要的对齐槽位（例如 16KB VF BAR 打碎
+        // 32MB PF BAR 的 128 个候选槽），导致窗口远未用满就报
+        // "BAR space exhausted"。先放大块后放小块，随机与 first-fit
+        // 兜底都不会再碎片化。
+        if (lhs.request.size > rhs.request.size)
+            return 1;
+        if (lhs.request.size < rhs.request.size)
+            return 0;
+
+        // 同尺寸之间保持原有 domain/function/role 顺序，保证放置结果
+        // 对同一 seed 可复现。
         if (domain_less(lhs.function_cfg.domain_key,
                         rhs.function_cfg.domain_key))
             return 1;
