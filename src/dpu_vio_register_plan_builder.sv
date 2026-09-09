@@ -1,12 +1,24 @@
+/*
+ * 所属层次：src/ VIO 寄存器计划构建层。
+ * 文件职责：把冻结设备/资源快照和 VIO policy 编译为有依赖顺序的配置、校验和 teardown 操作。
+ * 主要依赖：dpu_device_snapshot、dpu_resource_snapshot、dpu_reg_plan、dpu_vio_dataplane_plan_extension。
+ * 所有权与生命周期：借用输入快照，生成的 operation 由新 plan 拥有；失败时不发布未完成计划。
+ */
 `ifndef DPU_VIO_REGISTER_PLAN_BUILDER_SV
 `define DPU_VIO_REGISTER_PLAN_BUILDER_SV
 
+// 设计原因：将校验、解析或计划构建从 authoring 对象中隔离，保证输出规则集中且可复用。
+// 职责与所有权：该类通常是无状态服务；输入由调用方拥有，输出快照/计划在成功返回后交给调用方。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vio_register_plan_builder extends uvm_object;
     `uvm_object_utils(dpu_vio_register_plan_builder)
 
     dpu_vio_register_plan_policy policy;
     dpu_vio_dataplane_plan_extension dataplane_extension;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vio_register_plan_builder");
         super.new(name);
         policy = dpu_vio_register_plan_policy::type_id::create(
@@ -14,12 +26,18 @@ class dpu_vio_register_plan_builder extends uvm_object;
         dataplane_extension = null;
     endfunction
 
+// 功能：设置对象的配置字段、依赖对象或错误上下文（set_dataplane_extension）。
+// 输入/输出：输入为新值或外部对象；通常无返回值，字段写入当前对象。
+// 边界/副作用：必须尊重冻结边界；外部对象按约定借用或复制。
     function void set_dataplane_extension(
         input dpu_vio_dataplane_plan_extension new_extension
     );
         dataplane_extension = new_extension;
     endfunction
 
+// 功能：设置对象的配置字段、依赖对象或错误上下文（set_policy）。
+// 输入/输出：输入为新值或外部对象；通常无返回值，字段写入当前对象。
+// 边界/副作用：必须尊重冻结边界；外部对象按约定借用或复制。
     function void set_policy(input dpu_vio_register_plan_policy new_policy);
         if (new_policy == null)
             policy = dpu_vio_register_plan_policy::type_id::create(
@@ -28,6 +46,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
             policy = new_policy;
     endfunction
 
+// 功能：创建并填充一条带有目标、阶段和访问宽度的寄存器操作（make_af_op）。
+// 输入/输出：输入为 operation ID、目标地址、类型和依赖字段；返回新建 operation。
+// 边界/副作用：只构造值对象，不执行硬件；缺少必填目标由调用方在加入计划前拒绝。
     local function dpu_reg_op make_af_op(
         input string op_id,
         input dpu_reg_op_kind_e kind,
@@ -59,6 +80,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
         return op;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_op）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     local function bit add_op(
         input dpu_reg_plan candidate,
         input dpu_reg_op op,
@@ -69,6 +93,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
         return 1;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_notify_verify_op）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     local function bit add_notify_verify_op(
         input dpu_reg_plan candidate,
         input string op_id,
@@ -93,6 +120,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
         return add_op(candidate, op, why);
     endfunction
 
+// 功能：验证寄存器地址和访问宽度落在已解析的 BAR aperture 内（check_af_bar0_aperture）。
+// 输入/输出：输入为目标 function、BAR 和相对地址/宽度；返回 bit 并写入失败原因。
+// 边界/副作用：检查加法溢出和边界包含关系，越界时不能生成可执行操作。
     local function bit check_af_bar0_aperture(
         input dpu_bar_pair_lease_t af_bar0,
         input bit [63:0] offset,
@@ -111,6 +141,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
         return 1;
     endfunction
 
+// 功能：生成寄存器操作使用的稳定命名空间前缀（function_bdf_op_id）。
+// 输入/输出：输入为 function/binding 标识；返回字符串，不修改快照。
+// 边界/副作用：前缀必须与依赖 ID 的构造规则一致，避免不同 owner 产生重复 operation ID。
     local function string function_bdf_op_id(
         input dpu_function_key_t function_key,
         input dpu_pcie_function_id_t pcie_id,
@@ -121,6 +154,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
             pcie_id.bdf, global_function_id);
     endfunction
 
+// 功能：生成寄存器操作使用的稳定命名空间前缀（binding_prefix）。
+// 输入/输出：输入为 function/binding 标识；返回字符串，不修改快照。
+// 边界/副作用：前缀必须与依赖 ID 的构造规则一致，避免不同 owner 产生重复 operation ID。
     local function string binding_prefix(
         input dpu_vio_qpair_binding_t binding,
         input dpu_pcie_function_id_t pcie_id,
@@ -131,6 +167,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
             pcie_id.bdf, ordinal, binding.global_qpair_id);
     endfunction
 
+// 功能：生成寄存器操作使用的稳定命名空间前缀（af_extra_binding_prefix）。
+// 输入/输出：输入为 function/binding 标识；返回字符串，不修改快照。
+// 边界/副作用：前缀必须与依赖 ID 的构造规则一致，避免不同 owner 产生重复 operation ID。
     local function string af_extra_binding_prefix(
         input dpu_af_extra_queue_binding_t binding,
         input dpu_pcie_function_id_t pcie_id
@@ -141,6 +180,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
             binding.global_qpair_id);
     endfunction
 
+// 功能：依据快照、能力和 policy 构建有序寄存器计划（build）。
+// 输入/输出：输入为冻结快照及构建选项，输出 plan 与 why；成功返回 1。
+// 边界/副作用：缺少快照、BAR aperture 或依赖项时失败，不能返回部分计划。
     function bit build(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -760,6 +802,9 @@ class dpu_vio_register_plan_builder extends uvm_object;
         return 1;
     endfunction
 
+// 功能：依据快照、能力和 policy 构建有序寄存器计划（build_teardown）。
+// 输入/输出：输入为冻结快照及构建选项，输出 plan 与 why；成功返回 1。
+// 边界/副作用：缺少快照、BAR aperture 或依赖项时失败，不能返回部分计划。
     function bit build_teardown(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,

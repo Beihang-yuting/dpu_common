@@ -1,6 +1,15 @@
+/*
+ * 所属层次：src/ 设备配置解析与资源分配层。
+ * 文件职责：校验 authoring 配置，按稳定规则分配 BDF/BAR，并原子地产生冻结设备快照。
+ * 主要依赖：dpu_device_cfg、dpu_dut_caps、dpu_device_snapshot、设备键类型。
+ * 所有权与生命周期：不拥有输入配置；成功时快照接管解析结果副本，失败时不污染既有快照或配置。
+ */
 `ifndef DPU_DEVICE_RESOLVER_SV
 `define DPU_DEVICE_RESOLVER_SV
 
+// 设计原因：将校验、解析或计划构建从 authoring 对象中隔离，保证输出规则集中且可复用。
+// 职责与所有权：该类通常是无状态服务；输入由调用方拥有，输出快照/计划在成功返回后交给调用方。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_device_resolver extends uvm_object;
     `uvm_object_utils(dpu_device_resolver)
 
@@ -15,6 +24,9 @@ class dpu_device_resolver extends uvm_object;
         bit [63:0] size;
     } dpu_used_bar_t;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_device_resolver");
         super.new(name);
     endfunction
@@ -22,10 +34,16 @@ class dpu_device_resolver extends uvm_object;
     // Keep BAR randomization on the simulator/UVM random stream so the normal
     // simulation seed controls reproducibility.  Rejection sampling avoids a
     // modulo bias for apertures larger than 32 bits.
+// 功能：生成受范围约束的随机值或打乱候选顺序（random_u64）。
+// 输入/输出：输入为随机状态、上限或候选数组；返回随机值/成功标志。
+// 边界/副作用：上限为零、状态非法或数组为空时安全返回，不产生越界 ID。
     protected function bit [63:0] random_u64();
         return {$urandom(), $urandom()};
     endfunction
 
+// 功能：生成受范围约束的随机值或打乱候选顺序（random_bounded_u64）。
+// 输入/输出：输入为随机状态、上限或候选数组；返回随机值/成功标志。
+// 边界/副作用：上限为零、状态非法或数组为空时安全返回，不产生越界 ID。
     protected function bit [63:0] random_bounded_u64(
         input bit [63:0] upper_exclusive
     );
@@ -40,14 +58,23 @@ class dpu_device_resolver extends uvm_object;
         return candidate % upper_exclusive;
     endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（host_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
     protected function string host_key_name(input int unsigned host_id);
         return $sformatf("h%0d", host_id);
     endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（domain_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
     protected function string domain_key_name(input dpu_pcie_domain_key_t key);
         return dpu_pcie_domain_key_name(key);
     endfunction
 
+// 功能：比较两个键或范围，提供确定性的排序或兼容性判定（function_less）。
+// 输入/输出：输入为两个值语义对象；返回 bit，不修改输入。
+// 边界/副作用：比较规则必须覆盖 domain/owner 和边界值，保证排序与资源冲突检查使用同一语义。
     protected function bit function_less(
         input dpu_function_key_t lhs,
         input dpu_function_key_t rhs
@@ -61,6 +88,9 @@ class dpu_device_resolver extends uvm_object;
         return lhs.vf_id < rhs.vf_id;
     endfunction
 
+// 功能：比较两个键或范围，提供确定性的排序或兼容性判定（domain_less）。
+// 输入/输出：输入为两个值语义对象；返回 bit，不修改输入。
+// 边界/副作用：比较规则必须覆盖 domain/owner 和边界值，保证排序与资源冲突检查使用同一语义。
     protected function bit domain_less(
         input dpu_pcie_domain_key_t lhs,
         input dpu_pcie_domain_key_t rhs
@@ -70,6 +100,9 @@ class dpu_device_resolver extends uvm_object;
         return lhs.segment_id < rhs.segment_id;
     endfunction
 
+// 功能：比较两个键或范围，提供确定性的排序或兼容性判定（bar_item_less）。
+// 输入/输出：输入为两个值语义对象；返回 bit，不修改输入。
+// 边界/副作用：比较规则必须覆盖 domain/owner 和边界值，保证排序与资源冲突检查使用同一语义。
     protected function bit bar_item_less(
         input dpu_bar_work_item_t lhs,
         input dpu_bar_work_item_t rhs
@@ -99,6 +132,9 @@ class dpu_device_resolver extends uvm_object;
         return lhs.request.role < rhs.request.role;
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_functions）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_functions(ref dpu_function_cfg functions[$]);
         dpu_function_cfg swap;
 
@@ -113,6 +149,9 @@ class dpu_device_resolver extends uvm_object;
         end
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_bar_items）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_bar_items(ref dpu_bar_work_item_t items[$]);
         dpu_bar_work_item_t swap;
 
@@ -127,6 +166,9 @@ class dpu_device_resolver extends uvm_object;
         end
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_windows）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_windows(ref dpu_mmio_window_cfg windows[$]);
         dpu_mmio_window_cfg swap;
 
@@ -143,6 +185,9 @@ class dpu_device_resolver extends uvm_object;
         end
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_bdf_ranges）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_bdf_ranges(ref dpu_bdf_range_t ranges[$]);
         dpu_bdf_range_t swap;
 
@@ -159,6 +204,9 @@ class dpu_device_resolver extends uvm_object;
         end
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（find_domain）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     protected function bit find_domain(
         input dpu_device_cfg cfg,
         input dpu_pcie_domain_key_t key,
@@ -178,6 +226,9 @@ class dpu_device_resolver extends uvm_object;
         return 0;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（bdf_in_ranges）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit bdf_in_ranges(
         input dpu_pcie_domain_cfg domain,
         input bit [15:0] bdf
@@ -190,6 +241,9 @@ class dpu_device_resolver extends uvm_object;
         return 0;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（bdf_reserved）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit bdf_reserved(
         input dpu_pcie_domain_cfg domain,
         input bit [15:0] bdf
@@ -201,6 +255,12 @@ class dpu_device_resolver extends uvm_object;
         return 0;
     endfunction
 
+// 功能：检查配置对象、范围或键是否满足兼容性约束（bar_request_shape_valid）。
+// 输入/输出：输入为待比较值/范围；返回 bit，不修改输入。
+// 边界/副作用：显式处理闭区间、对齐和 domain/owner 边界。
+// 功能：校验拓扑、绑定或保留区间之间的跨对象不变量（bar_request_shape_valid）。
+// 输入/输出：输入为当前快照/计划及诊断输出；返回 bit 并写明首个冲突。
+// 边界/副作用：发现重复 global/local ID、owner 不匹配或区间重叠时必须整体失败。
     protected function bit bar_request_shape_valid(
         input dpu_function_cfg function_cfg,
         input dpu_bar_request request,
@@ -229,6 +289,9 @@ class dpu_device_resolver extends uvm_object;
         return 1;
     endfunction
 
+// 功能：检查配置对象、范围或键是否满足兼容性约束（ranges_overlap）。
+// 输入/输出：输入为待比较值/范围；返回 bit，不修改输入。
+// 边界/副作用：显式处理闭区间、对齐和 domain/owner 边界。
     protected function bit ranges_overlap(
         input bit [63:0] lhs_base,
         input bit [63:0] lhs_end,
@@ -238,6 +301,12 @@ class dpu_device_resolver extends uvm_object;
         return (lhs_base < rhs_end) && (rhs_base < lhs_end);
     endfunction
 
+// 功能：检查配置对象、范围或键是否满足兼容性约束（compatible_window_contains）。
+// 输入/输出：输入为待比较值/范围；返回 bit，不修改输入。
+// 边界/副作用：显式处理闭区间、对齐和 domain/owner 边界。
+// 功能：比较两个键或范围，提供确定性的排序或兼容性判定（compatible_window_contains）。
+// 输入/输出：输入为两个值语义对象；返回 bit，不修改输入。
+// 边界/副作用：比较规则必须覆盖 domain/owner 和边界值，保证排序与资源冲突检查使用同一语义。
     protected function bit compatible_window_contains(
         input dpu_pcie_domain_cfg domain,
         input dpu_bar_request request,
@@ -253,6 +322,9 @@ class dpu_device_resolver extends uvm_object;
         return 0;
     endfunction
 
+// 功能：检查配置对象、范围或键是否满足兼容性约束（valid_function_key）。
+// 输入/输出：输入为待比较值/范围；返回 bit，不修改输入。
+// 边界/副作用：显式处理闭区间、对齐和 domain/owner 边界。
     protected function bit valid_function_key(
         input dpu_function_key_t key,
         input dpu_dut_caps caps,
@@ -293,6 +365,9 @@ class dpu_device_resolver extends uvm_object;
         return 1;
     endfunction
 
+// 功能：校验对象字段之间的约束和跨字段不变量（validate）。
+// 输入/输出：输入为当前对象状态；返回 bit，并在 why 中给出首个失败原因。
+// 边界/副作用：只读检查；空键、越界、重复项或不一致组合必须拒绝。
     function bit validate(input dpu_device_cfg cfg, output string why);
         bit host_keys[string];
         bit domain_keys[string];
@@ -542,6 +617,9 @@ class dpu_device_resolver extends uvm_object;
         return 1;
     endfunction
 
+// 功能：将 authoring 配置解析为可消费的冻结快照或资源结果（resolve）。
+// 输入/输出：输入为配置/计划及输出对象；成功返回 1，失败返回 0 并填写 why/diagnostic。
+// 边界/副作用：失败不得发布半成品结果，也不得反向修改输入配置。
     function bit resolve(
         input dpu_device_cfg cfg,
         output dpu_device_snapshot snapshot,

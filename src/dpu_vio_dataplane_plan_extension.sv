@@ -1,3 +1,9 @@
+/*
+ * 所属层次：src/ VIO dataplane 寄存器计划扩展层。
+ * 文件职责：封装 QSCH/VTX/VRX 字段打包和 driver dataplane 操作生成，供通用 VIO builder 注入。
+ * 主要依赖：dpu_vio_qsch_topology、dpu_resource_snapshot、dpu_reg_op、dpu_vio_reg_plan_types。
+ * 所有权与生命周期：借用 topology/resource snapshot，生成的操作由 plan 接管；打包函数拒绝超宽值。
+ */
 `ifndef DPU_VIO_DATAPLANE_PLAN_EXTENSION_SV
 `define DPU_VIO_DATAPLANE_PLAN_EXTENSION_SV
 
@@ -5,13 +11,22 @@
 // The audited core builder deliberately owns no QSCH/VTX/VRX offsets yet.
 // Subclasses receive immutable topology/resource snapshots and the still
 // mutable core plan after BDF/MSI-X/notify operations have been assembled.
+// 设计原因：把跨阶段解析结果和派生索引封装起来，避免消费者直接依赖可变配置。
+// 职责与所有权：对象在 freeze 前填充并拥有内部副本，freeze 后只读，查询者只能获得值复制。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vio_dataplane_plan_extension extends uvm_object;
     `uvm_object_utils(dpu_vio_dataplane_plan_extension)
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vio_dataplane_plan_extension");
         super.new(name);
     endfunction
 
+// 功能：为通用 VIO 计划贡献 dataplane 专属操作（contribute_qsch）。
+// 输入/输出：输入为快照、拓扑和当前 plan；成功返回 1，失败写入 why。
+// 边界/副作用：绑定缺失或 aperture 不足时拒绝生成，保持计划可诊断。
     virtual function bit contribute_qsch(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -22,6 +37,9 @@ class dpu_vio_dataplane_plan_extension extends uvm_object;
         return 1;
     endfunction
 
+// 功能：为通用 VIO 计划贡献 dataplane 专属操作（contribute_vtx）。
+// 输入/输出：输入为快照、拓扑和当前 plan；成功返回 1，失败写入 why。
+// 边界/副作用：绑定缺失或 aperture 不足时拒绝生成，保持计划可诊断。
     virtual function bit contribute_vtx(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -32,6 +50,9 @@ class dpu_vio_dataplane_plan_extension extends uvm_object;
         return 1;
     endfunction
 
+// 功能：为通用 VIO 计划贡献 dataplane 专属操作（contribute_vrx）。
+// 输入/输出：输入为快照、拓扑和当前 plan；成功返回 1，失败写入 why。
+// 边界/副作用：绑定缺失或 aperture 不足时拒绝生成，保持计划可诊断。
     virtual function bit contribute_vrx(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -42,6 +63,9 @@ class dpu_vio_dataplane_plan_extension extends uvm_object;
         return 1;
     endfunction
 
+// 功能：为通用 VIO 计划贡献 dataplane 专属操作（contribute）。
+// 输入/输出：输入为快照、拓扑和当前 plan；成功返回 1，失败写入 why。
+// 边界/副作用：绑定缺失或 aperture 不足时拒绝生成，保持计划可诊断。
     virtual function bit contribute(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -129,6 +153,9 @@ typedef struct {
     int unsigned dma_msix;
 } dpu_vio_vrx_queue_cfg_t;
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_qsch_q2tc）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_qsch_q2tc(
     input int unsigned cos,
     input int unsigned net_id,
@@ -152,6 +179,9 @@ function automatic bit dpu_vio_pack_qsch_q2tc(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_qsch_n2g）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_qsch_n2g(
     input int unsigned group_id,
     input bit valid,
@@ -169,6 +199,9 @@ function automatic bit dpu_vio_pack_qsch_n2g(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_qsch_g2p）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_qsch_g2p(
     input int unsigned src_port,
     input int unsigned dst_port,
@@ -195,6 +228,9 @@ function automatic bit dpu_vio_pack_qsch_g2p(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_qsch_spwrr）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_qsch_spwrr(
     input int unsigned spwrr,
     output bit [31:0] payload,
@@ -210,6 +246,9 @@ function automatic bit dpu_vio_pack_qsch_spwrr(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_qsch_tc_weight）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_qsch_tc_weight(
     input int unsigned tc_weight[8],
     output bit [31:0] payload,
@@ -229,6 +268,9 @@ function automatic bit dpu_vio_pack_qsch_tc_weight(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_vtx_queue_para）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_vtx_queue_para(
     input dpu_vio_vtx_queue_cfg_t cfg,
     input int unsigned sport_type,
@@ -276,6 +318,9 @@ function automatic bit dpu_vio_pack_vtx_queue_para(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_vrx_queue_para）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_vrx_queue_para(
     input dpu_vio_vrx_queue_cfg_t cfg,
     output bit [31:0] content[3],
@@ -314,6 +359,9 @@ function automatic bit dpu_vio_pack_vrx_queue_para(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_vtx_ram_cfg）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_vtx_ram_cfg(
     input int unsigned global_qpair_id,
     input bit write_enable,
@@ -332,6 +380,9 @@ function automatic bit dpu_vio_pack_vtx_ram_cfg(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_vrx_ram_cfg）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_vrx_ram_cfg(
     input int unsigned global_qpair_id,
     input bit write_enable,
@@ -349,6 +400,9 @@ function automatic bit dpu_vio_pack_vrx_ram_cfg(
     return 1;
 endfunction
 
+// 设计原因：把跨阶段解析结果和派生索引封装起来，避免消费者直接依赖可变配置。
+// 职责与所有权：对象在 freeze 前填充并拥有内部副本，freeze 后只读，查询者只能获得值复制。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vio_driver_dataplane_extension extends
     dpu_vio_dataplane_plan_extension;
     `uvm_object_utils(dpu_vio_driver_dataplane_extension)
@@ -374,6 +428,9 @@ class dpu_vio_driver_dataplane_extension extends
     dpu_vio_vtx_queue_cfg_t vtx_queues[$];
     dpu_vio_vrx_queue_cfg_t vrx_queues[$];
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vio_driver_dataplane_extension");
         super.new(name);
         emit_qsch_init = 1;
@@ -392,10 +449,16 @@ class dpu_vio_driver_dataplane_extension extends
         vrx_queues.delete();
     endfunction
 
+// 功能：设置对象的配置字段、依赖对象或错误上下文（set_qsch_topology）。
+// 输入/输出：输入为新值或外部对象；通常无返回值，字段写入当前对象。
+// 边界/副作用：必须尊重冻结边界；外部对象按约定借用或复制。
     function void set_qsch_topology(input dpu_qsch_topology_cfg topology);
         qsch_topology = topology;
     endfunction
 
+// 功能：把外部快照中的资源 profile 注册到本地 registry（import_qsch_topology）。
+// 输入/输出：输入为 profile 和 authority；返回成功标志并填写 why。
+// 边界/副作用：只接受身份匹配且未重复的资源，失败不改变既有租约。
     local function bit import_qsch_topology(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -439,6 +502,9 @@ class dpu_vio_driver_dataplane_extension extends
         return 1;
     endfunction
 
+// 功能：创建并填充一条带有目标、阶段和访问宽度的寄存器操作（make_op）。
+// 输入/输出：输入为 operation ID、目标地址、类型和依赖字段；返回新建 operation。
+// 边界/副作用：只构造值对象，不执行硬件；缺少必填目标由调用方在加入计划前拒绝。
     local function dpu_reg_op make_op(
         input string op_id,
         input dpu_pcie_function_id_t af_pcie_id,
@@ -468,6 +534,9 @@ class dpu_vio_driver_dataplane_extension extends
         return op;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_op）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     local function bit add_op(
         input dpu_reg_plan plan,
         input dpu_reg_op op,
@@ -476,6 +545,9 @@ class dpu_vio_driver_dataplane_extension extends
         return plan.add_operation(op, why);
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_context）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     local function bit get_context(
         input dpu_device_snapshot device_snapshot,
         output dpu_function_key_t af_key,
@@ -497,6 +569,9 @@ class dpu_vio_driver_dataplane_extension extends
     // The core VIO builder commits the notify shadow before the AF dataplane
     // tables are touched.  Return that commit operation so the generated DAG
     // preserves the same ordering when a concrete PCIe executor is used.
+// 功能：按键查询内部索引或导出值复制（get_notify_commit_dependency）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     local function bit get_notify_commit_dependency(
         input dpu_reg_plan plan,
         output string dependency_id,
@@ -526,6 +601,9 @@ class dpu_vio_driver_dataplane_extension extends
         return 1;
     endfunction
 
+// 功能：验证寄存器地址和访问宽度落在已解析的 BAR aperture 内（check_aperture）。
+// 输入/输出：输入为目标 function、BAR 和相对地址/宽度；返回 bit 并写入失败原因。
+// 边界/副作用：检查加法溢出和边界包含关系，越界时不能生成可执行操作。
     local function bit check_aperture(
         input dpu_bar_pair_lease_t af_bar0,
         input bit [63:0] offset,
@@ -544,6 +622,9 @@ class dpu_vio_driver_dataplane_extension extends
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（find_binding）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     local function bit find_binding(
         input dpu_resource_snapshot resource_snapshot,
         input int unsigned global_qpair_id,
@@ -561,6 +642,9 @@ class dpu_vio_driver_dataplane_extension extends
         return 0;
     endfunction
 
+// 功能：根据 QSCH 拓扑和资源绑定计算队列/功能寄存器字段（qsch_queue_values）。
+// 输入/输出：输入为 function、queue 或 binding 上下文；通过 output 返回字段值和成功标志。
+// 边界/副作用：绑定缺失、字段超宽或拓扑不一致时失败，不产生部分寄存器操作。
     local function bit qsch_queue_values(
         input int unsigned global_qpair_id,
         output int unsigned cos,
@@ -583,6 +667,9 @@ class dpu_vio_driver_dataplane_extension extends
         return 1;
     endfunction
 
+// 功能：根据 QSCH 拓扑和资源绑定计算队列/功能寄存器字段（qsch_function_values）。
+// 输入/输出：输入为 function、queue 或 binding 上下文；通过 output 返回字段值和成功标志。
+// 边界/副作用：绑定缺失、字段超宽或拓扑不一致时失败，不产生部分寄存器操作。
     local function bit qsch_function_values(
         input dpu_function_key_t key,
         output int unsigned src_port,
@@ -623,12 +710,18 @@ class dpu_vio_driver_dataplane_extension extends
         return 1;
     endfunction
 
+// 功能：生成寄存器操作使用的稳定命名空间前缀（qsch_prefix）。
+// 输入/输出：输入为 function/binding 标识；返回字符串，不修改快照。
+// 边界/副作用：前缀必须与依赖 ID 的构造规则一致，避免不同 owner 产生重复 operation ID。
     local function string qsch_prefix(input dpu_function_key_t key,
                                       input int unsigned qid);
         return {"vio.dataplane.qsch.", dpu_function_key_name(key),
                $sformatf(".q%0d", qid)};
     endfunction
 
+// 功能：生成寄存器操作使用的稳定命名空间前缀（qsch_function_prefix）。
+// 输入/输出：输入为 function/binding 标识；返回字符串，不修改快照。
+// 边界/副作用：前缀必须与依赖 ID 的构造规则一致，避免不同 owner 产生重复 operation ID。
     local function string qsch_function_prefix(input dpu_function_key_t key,
                                                input int unsigned qid);
         // Function tables are indexed by global function ID, so their
@@ -638,6 +731,9 @@ class dpu_vio_driver_dataplane_extension extends
         return {"vio.dataplane.qsch.", dpu_function_key_name(key)};
     endfunction
 
+// 功能：为通用 VIO 计划贡献 dataplane 专属操作（contribute_qsch）。
+// 输入/输出：输入为快照、拓扑和当前 plan；成功返回 1，失败写入 why。
+// 边界/副作用：绑定缺失或 aperture 不足时拒绝生成，保持计划可诊断。
     virtual function bit contribute_qsch(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -903,6 +999,9 @@ class dpu_vio_driver_dataplane_extension extends
         return 1;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_vtx_one）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     local function bit add_vtx_one(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -971,6 +1070,9 @@ class dpu_vio_driver_dataplane_extension extends
         return add_op(plan, op, why);
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_vrx_one）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     local function bit add_vrx_one(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -1033,6 +1135,9 @@ class dpu_vio_driver_dataplane_extension extends
         return add_op(plan, op, why);
     endfunction
 
+// 功能：为通用 VIO 计划贡献 dataplane 专属操作（contribute_vtx）。
+// 输入/输出：输入为快照、拓扑和当前 plan；成功返回 1，失败写入 why。
+// 边界/副作用：绑定缺失或 aperture 不足时拒绝生成，保持计划可诊断。
     virtual function bit contribute_vtx(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -1075,6 +1180,9 @@ class dpu_vio_driver_dataplane_extension extends
         return 1;
     endfunction
 
+// 功能：为通用 VIO 计划贡献 dataplane 专属操作（contribute_vrx）。
+// 输入/输出：输入为快照、拓扑和当前 plan；成功返回 1，失败写入 why。
+// 边界/副作用：绑定缺失或 aperture 不足时拒绝生成，保持计划可诊断。
     virtual function bit contribute_vrx(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,

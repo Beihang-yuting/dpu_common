@@ -1,3 +1,9 @@
+/*
+ * 所属层次：src/ 资源租约与注册表层。
+ * 文件职责：从冻结快照导入资源 profile，管理 function/service 的唯一租约和 global qpair 映射。
+ * 主要依赖：dpu_device_snapshot、dpu_resource_snapshot、dpu_resource_types。
+ * 所有权与生命周期：manager 拥有 registry 状态并以 authority token 控制写入；seal 后资源类别不可变。
+ */
 `ifndef DPU_RESOURCE_MANAGER_SV
 `define DPU_RESOURCE_MANAGER_SV
 
@@ -8,20 +14,32 @@
 // functions declared by the global device snapshot.
 // =============================================================================
 
+// 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
+// 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_resource_function_state;
     dpu_function_key_t key;
     dpu_resource_lease_t leases[$];
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(dpu_function_key_t function_key);
         key = function_key;
     endfunction
 endclass : dpu_resource_function_state
 
 
+// 设计原因：集中维护唯一资源租约和跨快照索引，防止多个消费者重复占用资源。
+// 职责与所有权：对象拥有 registry 状态和授权令牌；输入快照只读，封存后禁止继续写入。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_resource_registry_authority;
 endclass : dpu_resource_registry_authority
 
 
+// 设计原因：集中维护唯一资源租约和跨快照索引，防止多个消费者重复占用资源。
+// 职责与所有权：对象拥有 registry 状态和授权令牌；输入快照只读，封存后禁止继续写入。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_resource_manager extends uvm_object;
     `uvm_object_utils(dpu_resource_manager)
 
@@ -50,6 +68,9 @@ class dpu_resource_manager extends uvm_object;
     ][dpu_resource_class_id_t][int unsigned];
     protected dpu_dut_caps                  dut_caps;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_resource_manager");
         super.new(name);
         dut_caps = dpu_dut_caps::type_id::create("dut_caps");
@@ -62,12 +83,18 @@ class dpu_resource_manager extends uvm_object;
         configured_resource_snapshot = null;
     endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（function_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
     protected function string function_key_name(
         input dpu_function_key_t key
     );
         return dpu_function_key_name(key);
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（validate_function_key）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit validate_function_key(
         input dpu_function_key_t key,
         output string why
@@ -108,6 +135,9 @@ class dpu_resource_manager extends uvm_object;
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（lookup_function_state）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     protected function bit lookup_function_state(
         input dpu_function_key_t key,
         output dpu_resource_function_state state,
@@ -127,6 +157,9 @@ class dpu_resource_manager extends uvm_object;
         return 1;
     endfunction
 
+// 功能：统计 registry 中指定类别已租用或已分配的资源数（function_class_lease_count）。
+// 输入/输出：输入为 function/service 类别；返回计数，不改变租约。
+// 边界/副作用：统计不包含失效 owner 或未封存临时项，调用方据此判断容量上限。
     protected function int unsigned function_class_lease_count(
         input dpu_resource_function_state state,
         input dpu_resource_class_id_t class_id
@@ -141,6 +174,9 @@ class dpu_resource_manager extends uvm_object;
         return count;
     endfunction
 
+// 功能：统计 registry 中指定类别已租用或已分配的资源数（allocated_count）。
+// 输入/输出：输入为 function/service 类别；返回计数，不改变租约。
+// 边界/副作用：统计不包含失效 owner 或未封存临时项，调用方据此判断容量上限。
     protected function int unsigned allocated_count(
         input dpu_resource_class_id_t class_id
     );
@@ -149,6 +185,9 @@ class dpu_resource_manager extends uvm_object;
         return 0;
     endfunction
 
+// 功能：从冻结快照初始化 registry 的 function/resource 状态（seed_function）。
+// 输入/输出：输入为设备/资源快照及 authority；成功返回 bit 并写入内部副本。
+// 边界/副作用：身份校验或重复 seed 失败时保持既有租约和索引不变。
     protected function bit seed_function(
         input dpu_function_key_t key,
         output string why
@@ -186,6 +225,9 @@ class dpu_resource_manager extends uvm_object;
         return 1;
     endfunction
 
+// 功能：取得受控资源注册表的唯一写入授权（claim_registry_authority）。
+// 输入/输出：无输入或输入调用方身份；返回 authority token/句柄。
+// 边界/副作用：重复领取、无效 owner 或已封存 registry 时必须拒绝。
     function dpu_resource_registry_authority claim_registry_authority();
         if (registry_authority_claimed || (function_states.num() != 0) ||
             (class_id_by_name.num() != 0) || resource_classes_sealed)
@@ -196,6 +238,9 @@ class dpu_resource_manager extends uvm_object;
 
     // The resource snapshot is the VIO qpair authority. Build all imported
     // state in a private candidate so no failed import can publish state.
+// 功能：从冻结快照初始化 registry 的 function/resource 状态（configure_from_snapshots）。
+// 输入/输出：输入为设备/资源快照及 authority；成功返回 bit 并写入内部副本。
+// 边界/副作用：身份校验或重复 seed 失败时保持既有租约和索引不变。
     function bit configure_from_snapshots(
         input dpu_resource_registry_authority authority,
         input dpu_device_snapshot device_snapshot,
@@ -438,6 +483,9 @@ class dpu_resource_manager extends uvm_object;
         return 1;
     endfunction
 
+// 功能：导出 DUT 能力对象的独立副本（snapshot_dut_caps）。
+// 输入/输出：无输入或仅有 output 语义；返回新能力对象，不暴露内部可变引用。
+// 边界/副作用：快照/manager 内部能力保持不变，未配置能力时返回明确的空值。
     function dpu_dut_caps snapshot_dut_caps();
         dpu_dut_caps snapshot;
         snapshot = dpu_dut_caps::type_id::create("dut_caps_snapshot");
@@ -447,6 +495,9 @@ class dpu_resource_manager extends uvm_object;
 
     // Snapshot profile IDs are externally visible lease/query identities.
     // Unlike legacy registration, importing must retain them exactly.
+// 功能：把外部快照中的资源 profile 注册到本地 registry（register_imported_resource_profile）。
+// 输入/输出：输入为 profile 和 authority；返回成功标志并填写 why。
+// 边界/副作用：只接受身份匹配且未重复的资源，失败不改变既有租约。
     protected function bit register_imported_resource_profile(
         input dpu_resource_pool_config_t profile,
         output dpu_resource_class_id_t class_id,
@@ -482,6 +533,9 @@ class dpu_resource_manager extends uvm_object;
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（lookup_resource_class）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit lookup_resource_class(
         input string name,
         output dpu_resource_class_id_t class_id,
@@ -501,14 +555,23 @@ class dpu_resource_manager extends uvm_object;
     // Clients may bind only to functions already owned by the device
     // registry.  This is intentionally read-only: protocol environments do
     // not author topology or register functions themselves.
+// 功能：判断对象是否满足指定状态、资格或引用关系（contains_function）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     function bit contains_function(input dpu_function_key_t key);
         return function_states.exists(function_key_name(key));
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（is_snapshot_seeded）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     function bit is_snapshot_seeded();
         return snapshot_configured;
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（is_seeded_from_snapshots）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     function bit is_seeded_from_snapshots(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot
@@ -519,6 +582,9 @@ class dpu_resource_manager extends uvm_object;
                (configured_resource_snapshot == resource_snapshot);
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（local_pair_to_global_qpair）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     function bit local_pair_to_global_qpair(
         input dpu_service_key_t service_key,
         input dpu_resource_class_id_t class_id,
@@ -539,6 +605,9 @@ class dpu_resource_manager extends uvm_object;
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_service_leases）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_service_leases(
         input dpu_service_key_t service_key,
         ref dpu_resource_lease_t leases[$]
@@ -564,6 +633,9 @@ class dpu_resource_manager extends uvm_object;
         end
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_function_leases）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_function_leases(
         input dpu_function_key_t function_key,
         ref dpu_resource_lease_t leases[$]
@@ -589,6 +661,9 @@ class dpu_resource_manager extends uvm_object;
         end
     endfunction
 
+// 功能：封存资源类别和容量配置，阻止后续改变注册表契约（seal_resource_classes_internal）。
+// 输入/输出：输入为输出 why；返回 bit。
+// 边界/副作用：只有所有已导入 profile 通过校验才允许 seal，失败时 registry 仍可诊断。
     protected function bit seal_resource_classes_internal(output string why);
         resource_classes_sealed = 1;
         why = "";

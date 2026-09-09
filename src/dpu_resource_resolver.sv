@@ -1,6 +1,15 @@
+/*
+ * 所属层次：src/ 资源分配解析层。
+ * 文件职责：依据 normalized placement plan 为 VIO service 分配 local/global qpair，并记录失败诊断。
+ * 主要依赖：dpu_normalized_placement_plan、dpu_resource_snapshot、dpu_resource_types。
+ * 所有权与生命周期：不拥有输入 plan；成功时向目标 snapshot 写入绑定，失败时由调用方丢弃未冻结结果。
+ */
 `ifndef DPU_RESOURCE_RESOLVER_SV
 `define DPU_RESOURCE_RESOLVER_SV
 
+// 设计原因：将校验、解析或计划构建从 authoring 对象中隔离，保证输出规则集中且可复用。
+// 职责与所有权：该类通常是无状态服务；输入由调用方拥有，输出快照/计划在成功返回后交给调用方。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_resource_resolver extends uvm_object;
     `uvm_object_utils(dpu_resource_resolver)
 
@@ -14,6 +23,9 @@ class dpu_resource_resolver extends uvm_object;
         bit global_assigned;
     } dpu_qpair_candidate_t;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_resource_resolver");
         super.new(name);
     endfunction
@@ -22,6 +34,9 @@ class dpu_resource_resolver extends uvm_object;
     // using DIV_ROUND_UP(remaining_rings, remaining_vectors).  Keep the same
     // deterministic mapping when a function has fewer LAN MSI-X vectors than
     // qpairs, so shared-vector plans exercise the real interrupt topology.
+// 功能：把二维 service/pair 坐标映射为连续数组索引（pair_vector_index）。
+// 输入/输出：输入为 service index 和 pair index；返回索引值。
+// 边界/副作用：调用方必须先保证维度范围，函数不负责扩容或修复越界输入。
     protected function automatic int unsigned pair_vector_index(
         input int unsigned pair_index,
         input int unsigned qpair_count,
@@ -49,6 +64,9 @@ class dpu_resource_resolver extends uvm_object;
         return vector_count - 1;
     endfunction
 
+// 功能：按需创建或补齐诊断对象，保证失败路径可报告（ensure_diagnostic）。
+// 输入/输出：输入为 diagnostic 引用或上下文；无返回值。
+// 边界/副作用：只初始化缺失字段，不覆盖已有根因。
     protected function void ensure_diagnostic(
         output dpu_placement_diagnostic diagnostic
     );
@@ -57,6 +75,9 @@ class dpu_resource_resolver extends uvm_object;
                 {get_name(), "_diagnostic"});
     endfunction
 
+// 功能：记录资源解析失败的错误码、文本和可选定位上下文（set_failure）。
+// 输入/输出：输入为 diagnostic、阶段、错误码和 message；无返回值。
+// 边界/副作用：只保留可诊断根因，不覆盖已有更具体错误，也不继续写入冻结对象。
     protected function void set_failure(
         output dpu_placement_diagnostic diagnostic,
         input dpu_placement_error_e error_code,
@@ -66,6 +87,9 @@ class dpu_resource_resolver extends uvm_object;
         diagnostic.set(DPU_PLACE_STAGE_RESOURCE_RESOLUTION, error_code, message);
     endfunction
 
+// 功能：设置对象的配置字段、依赖对象或错误上下文（set_pair_failure）。
+// 输入/输出：输入为新值或外部对象；通常无返回值，字段写入当前对象。
+// 边界/副作用：必须尊重冻结边界；外部对象按约定借用或复制。
     protected function void set_pair_failure(
         output dpu_placement_diagnostic diagnostic,
         input dpu_placement_error_e error_code,
@@ -78,6 +102,12 @@ class dpu_resource_resolver extends uvm_object;
         diagnostic.set_service_context(candidate.pair.service_key);
     endfunction
 
+// 功能：检查配置对象、范围或键是否满足兼容性约束（same_service）。
+// 输入/输出：输入为待比较值/范围；返回 bit，不修改输入。
+// 边界/副作用：显式处理闭区间、对齐和 domain/owner 边界。
+// 功能：比较两个键或范围，提供确定性的排序或兼容性判定（same_service）。
+// 输入/输出：输入为两个值语义对象；返回 bit，不修改输入。
+// 边界/副作用：比较规则必须覆盖 domain/owner 和边界值，保证排序与资源冲突检查使用同一语义。
     protected function bit same_service(
         input dpu_service_key_t lhs,
         input dpu_service_key_t rhs
@@ -85,6 +115,9 @@ class dpu_resource_resolver extends uvm_object;
         return dpu_service_key_name(lhs) == dpu_service_key_name(rhs);
     endfunction
 
+// 功能：从候选 qpair 集合中选择最小的未占用 ID（lowest_free_local）。
+// 输入/输出：输入为占用集合/范围；返回是否找到并输出 ID。
+// 边界/副作用：跳过保留区间和已分配 ID；耗尽时返回失败而不复用冲突资源。
     protected function bit lowest_free_local(
         input bit occupied[DPU_VIO_NET_MAX_QPAIRS_PER_DEVICE],
         input int unsigned capacity,
@@ -100,6 +133,9 @@ class dpu_resource_resolver extends uvm_object;
         return 0;
     endfunction
 
+// 功能：从候选 qpair 集合中选择最小的未占用 ID（lowest_free_global）。
+// 输入/输出：输入为占用集合/范围；返回是否找到并输出 ID。
+// 边界/副作用：跳过保留区间和已分配 ID；耗尽时返回失败而不复用冲突资源。
     protected function bit lowest_free_global(
         input bit reserved[DPU_MAX_VIO_GLOBAL_QPAIRS],
         input bit occupied[DPU_MAX_VIO_GLOBAL_QPAIRS],
@@ -116,6 +152,9 @@ class dpu_resource_resolver extends uvm_object;
         return 0;
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_intervals）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_intervals(ref dpu_global_id_range_t intervals[$]);
         dpu_global_id_range_t swap;
         for (int left = 0; left < intervals.size(); left++) begin
@@ -131,6 +170,9 @@ class dpu_resource_resolver extends uvm_object;
         end
     endfunction
 
+// 功能：将 authoring 配置解析为可消费的冻结快照或资源结果（resolve）。
+// 输入/输出：输入为配置/计划及输出对象；成功返回 1，失败返回 0 并填写 why/diagnostic。
+// 边界/副作用：失败不得发布半成品结果，也不得反向修改输入配置。
     function bit resolve(
         input dpu_device_snapshot device_snapshot,
         input dpu_normalized_placement_plan normalized_plan,

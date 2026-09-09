@@ -1,15 +1,30 @@
+/*
+ * 所属层次：src/ 设备启动寄存器计划层。
+ * 文件职责：依据冻结设备快照和硬件能力生成可执行的 bootstrap 寄存器操作序列。
+ * 主要依赖：dpu_device_snapshot、dpu_dut_caps、dpu_reg_plan、dpu_reg_op。
+ * 所有权与生命周期：只借用输入快照，生成的计划由调用方持有；构建失败时计划不可发布。
+ */
 `ifndef DPU_DEVICE_BOOTSTRAP_PLAN_BUILDER_SV
 `define DPU_DEVICE_BOOTSTRAP_PLAN_BUILDER_SV
 
 localparam bit [63:0] DPU_AF_DECLARATION_ADDR = 64'h1010;
 
+// 设计原因：将校验、解析或计划构建从 authoring 对象中隔离，保证输出规则集中且可复用。
+// 职责与所有权：该类通常是无状态服务；输入由调用方拥有，输出快照/计划在成功返回后交给调用方。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_device_bootstrap_plan_builder extends uvm_object;
     `uvm_object_utils(dpu_device_bootstrap_plan_builder)
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_device_bootstrap_plan_builder");
         super.new(name);
     endfunction
 
+// 功能：创建并填充一条带有目标、阶段和访问宽度的寄存器操作（make_target_op）。
+// 输入/输出：输入为 operation ID、目标地址、类型和依赖字段；返回新建 operation。
+// 边界/副作用：只构造值对象，不执行硬件；缺少必填目标由调用方在加入计划前拒绝。
     local function dpu_reg_op make_target_op(
         input string op_id,
         input dpu_reg_op_kind_e kind,
@@ -39,6 +54,9 @@ class dpu_device_bootstrap_plan_builder extends uvm_object;
         return op;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_bar_pair）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     local function bit add_bar_pair(
         input dpu_reg_plan candidate,
         input dpu_pcie_function_id_t pcie_id,
@@ -80,6 +98,9 @@ class dpu_device_bootstrap_plan_builder extends uvm_object;
         return 1;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_af_sequence）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     local function bit add_af_sequence(
         input dpu_reg_plan candidate,
         input dpu_function_key_t af_key,
@@ -171,6 +192,9 @@ class dpu_device_bootstrap_plan_builder extends uvm_object;
         return 1;
     endfunction
 
+// 功能：依据快照、能力和 policy 构建有序寄存器计划（build）。
+// 输入/输出：输入为冻结快照及构建选项，输出 plan 与 why；成功返回 1。
+// 边界/副作用：缺少快照、BAR aperture 或依赖项时失败，不能返回部分计划。
     function bit build(
         input dpu_device_snapshot snapshot,
         output dpu_reg_plan plan,

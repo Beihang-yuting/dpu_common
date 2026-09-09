@@ -1,3 +1,9 @@
+/*
+ * 所属层次：src/ 设备键和轻量值类型层。
+ * 文件职责：定义设备逻辑对象的键、标识结构及稳定格式化/比较辅助函数。
+ * 主要依赖：SystemVerilog 基础类型。
+ * 所有权与生命周期：只提供值语义类型和纯函数，不持有外部资源或改变调用方数据。
+ */
 // =============================================================================
 // Canonical DPU device identities, placement records, and BAR roles
 // =============================================================================
@@ -74,26 +80,41 @@ typedef struct {
     bit [63:0] offset;
 } dpu_bar_address_match_t;
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_function_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
 function automatic string dpu_function_key_name(input dpu_function_key_t key);
     return $sformatf("h%0d.pf%0d.k%0d.vf%0d", key.host_id, key.pf_id,
                      key.kind, key.vf_id);
 endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_service_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
 function automatic string dpu_service_key_name(input dpu_service_key_t key);
     return $sformatf("%s.svc%0d.i%0d", dpu_function_key_name(key.function_key),
                      key.service_kind, key.service_instance_id);
 endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_pcie_domain_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
 function automatic string dpu_pcie_domain_key_name(
     input dpu_pcie_domain_key_t key
 );
     return $sformatf("h%0d.s%0d", key.host_id, key.segment_id);
 endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_host_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
 function automatic string dpu_host_key_name(input int unsigned host_id);
     return $sformatf("h%0d", host_id);
 endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_pcie_function_id_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
 function automatic string dpu_pcie_function_id_name(
     input dpu_pcie_function_id_t pcie_id
 );
@@ -101,6 +122,9 @@ function automatic string dpu_pcie_function_id_name(
                      pcie_id.bdf);
 endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_function_bar_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
 function automatic string dpu_function_bar_key_name(
     input dpu_function_key_t key,
     input dpu_bar_role_e role
@@ -108,6 +132,9 @@ function automatic string dpu_function_bar_key_name(
     return $sformatf("%s.bar_role%0d", dpu_function_key_name(key), role);
 endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（dpu_same_function_key）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
 function automatic bit dpu_same_function_key(
     input dpu_function_key_t lhs,
     input dpu_function_key_t rhs
@@ -116,6 +143,9 @@ function automatic bit dpu_same_function_key(
            (lhs.kind == rhs.kind) && (lhs.vf_id == rhs.vf_id);
 endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（dpu_same_domain_key）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
 function automatic bit dpu_same_domain_key(
     input dpu_pcie_domain_key_t lhs,
     input dpu_pcie_domain_key_t rhs

@@ -1,6 +1,15 @@
+/*
+ * 所属层次：src/ VIO 放置规范化服务层。
+ * 文件职责：校验放置配置、筛选可用 function、计算 qpair 目标并输出确定性的 normalized plan。
+ * 主要依赖：dpu_device_cfg、dpu_placement_cfg、dpu_normalized_placement_plan。
+ * 所有权与生命周期：无状态且不接管输入对象；失败通过 diagnostic 返回并保持输出计划不可用。
+ */
 `ifndef DPU_PLACEMENT_NORMALIZER_SV
 `define DPU_PLACEMENT_NORMALIZER_SV
 
+// 设计原因：将校验、解析或计划构建从 authoring 对象中隔离，保证输出规则集中且可复用。
+// 职责与所有权：该类通常是无状态服务；输入由调用方拥有，输出快照/计划在成功返回后交给调用方。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_placement_normalizer extends uvm_object;
     `uvm_object_utils(dpu_placement_normalizer)
 
@@ -12,10 +21,16 @@ class dpu_placement_normalizer extends uvm_object;
         dpu_vf_template_cfg vf_template;
     } candidate_t;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_placement_normalizer");
         super.new(name);
     endfunction
 
+// 功能：比较两个键或范围，提供确定性的排序或兼容性判定（key_less）。
+// 输入/输出：输入为两个值语义对象；返回 bit，不修改输入。
+// 边界/副作用：比较规则必须覆盖 domain/owner 和边界值，保证排序与资源冲突检查使用同一语义。
     protected function bit key_less(input dpu_function_key_t lhs,
                                     input dpu_function_key_t rhs);
         if (lhs.host_id != rhs.host_id) return lhs.host_id < rhs.host_id;
@@ -24,6 +39,9 @@ class dpu_placement_normalizer extends uvm_object;
         return lhs.vf_id < rhs.vf_id;
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_candidates）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_candidates(ref candidate_t candidates[$]);
         candidate_t swap;
         for (int left = 0; left < candidates.size(); left++) begin
@@ -36,6 +54,9 @@ class dpu_placement_normalizer extends uvm_object;
         end
     endfunction
 
+// 功能：检查配置对象、范围或键是否满足兼容性约束（valid_key）。
+// 输入/输出：输入为待比较值/范围；返回 bit，不修改输入。
+// 边界/副作用：显式处理闭区间、对齐和 domain/owner 边界。
     protected function bit valid_key(input dpu_function_key_t key,
                                      input dpu_dut_caps caps);
         if ((key.host_id >= caps.max_hosts) ||
@@ -48,6 +69,9 @@ class dpu_placement_normalizer extends uvm_object;
         endcase
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（contains_key）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     protected function bit contains_key(input dpu_function_key_t keys[$],
                                         input dpu_function_key_t key);
         foreach (keys[index])
@@ -55,16 +79,25 @@ class dpu_placement_normalizer extends uvm_object;
         return 0;
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（contains_int）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     protected function bit contains_int(input int unsigned values[$],
                                         input int unsigned value);
         foreach (values[index]) if (values[index] == value) return 1;
         return 0;
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（has_eligibility）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     protected function bit has_eligibility(input dpu_service_kind_e kinds[$]);
         return dpu_service_kind_is_eligible(kinds, DPU_SERVICE_VIO_NET);
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（source_has_vio）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit source_has_vio(input dpu_function_cfg function_cfg);
         foreach (function_cfg.services[index]) begin
             if ((function_cfg.services[index] != null) &&
@@ -74,6 +107,9 @@ class dpu_placement_normalizer extends uvm_object;
         return 0;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（find_explicit_function）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     protected function bit find_explicit_function(
         input dpu_device_cfg cfg, input dpu_function_key_t key,
         output dpu_function_cfg found
@@ -89,6 +125,9 @@ class dpu_placement_normalizer extends uvm_object;
         return 0;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（filter_matches）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit filter_matches(input dpu_vio_candidate_filter filter,
                                           input candidate_t candidate);
         if ((filter.host_ids.size() != 0) &&
@@ -102,6 +141,9 @@ class dpu_placement_normalizer extends uvm_object;
         return 1;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（validate_filter）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit validate_filter(input dpu_vio_candidate_filter filter,
                                            input dpu_dut_caps caps,
                                            output string why);
@@ -139,6 +181,9 @@ class dpu_placement_normalizer extends uvm_object;
         return 1;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（validate_pools）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit validate_pools(input dpu_device_cfg cfg,
                                           output string why);
         dpu_function_cfg parent;
@@ -187,6 +232,9 @@ class dpu_placement_normalizer extends uvm_object;
         return 1;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（collect_candidates）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit collect_candidates(
         input dpu_device_cfg cfg, input dpu_vio_placement_request request,
         output candidate_t candidates[$]
@@ -234,6 +282,9 @@ class dpu_placement_normalizer extends uvm_object;
         return candidates.size() != 0;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（find_candidate_index）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     protected function bit find_candidate_index(input candidate_t candidates[$],
                                                 input dpu_function_key_t key,
                                                 output int unsigned found_index);
@@ -247,6 +298,9 @@ class dpu_placement_normalizer extends uvm_object;
         return 0;
     endfunction
 
+// 功能：生成受范围约束的随机值或打乱候选顺序（xorshift32）。
+// 输入/输出：输入为随机状态、上限或候选数组；返回随机值/成功标志。
+// 边界/副作用：上限为零、状态非法或数组为空时安全返回，不产生越界 ID。
     protected function int unsigned xorshift32(ref int unsigned state);
         if (state == 0) state = 32'h6d2b79f5;
         state ^= state << 13;
@@ -255,6 +309,9 @@ class dpu_placement_normalizer extends uvm_object;
         return state;
     endfunction
 
+// 功能：生成受范围约束的随机值或打乱候选顺序（shuffle_candidates）。
+// 输入/输出：输入为随机状态、上限或候选数组；返回随机值/成功标志。
+// 边界/副作用：上限为零、状态非法或数组为空时安全返回，不产生越界 ID。
     protected function void shuffle_candidates(ref candidate_t candidates[$],
                                                input int unsigned seed);
         candidate_t swap;
@@ -270,6 +327,9 @@ class dpu_placement_normalizer extends uvm_object;
         end
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（target_minimum）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function int unsigned target_minimum(
         input dpu_vio_placement_request request,
         input dpu_function_key_t key,
@@ -304,6 +364,9 @@ class dpu_placement_normalizer extends uvm_object;
         return minimum;
     endfunction
 
+// 功能：记录资源解析失败的错误码、文本和可选定位上下文（set_failure）。
+// 输入/输出：输入为 diagnostic、阶段、错误码和 message；无返回值。
+// 边界/副作用：只保留可诊断根因，不覆盖已有更具体错误，也不继续写入冻结对象。
     protected function void set_failure(ref dpu_placement_diagnostic diagnostic,
                                         input dpu_placement_stage_e stage,
                                         input dpu_placement_error_e code,
@@ -314,6 +377,9 @@ class dpu_placement_normalizer extends uvm_object;
         if (has_request) diagnostic.set_request_context(request_id);
     endfunction
 
+// 功能：将放置配置规范化为稳定排序、唯一键和可分配的中间计划（normalize）。
+// 输入/输出：输入为设备配置和放置请求，输出 normalized plan 与 diagnostic。
+// 边界/副作用：无候选、键冲突、资源不足等边界必须通过诊断返回，不得静默丢弃。
     function bit normalize(input dpu_device_cfg device_cfg,
                            input dpu_resource_placement_cfg placement_cfg,
                            output dpu_device_cfg normalized_device_cfg,

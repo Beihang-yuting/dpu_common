@@ -1,3 +1,9 @@
+/*
+ * 所属层次：src/ 寄存器计划类型层。
+ * 文件职责：定义操作种类、目标空间、生命周期阶段和执行结果状态等跨模块契约。
+ * 主要依赖：SystemVerilog 枚举和基础类型。
+ * 所有权与生命周期：只提供编译期值类型，不拥有对象或运行时资源。
+ */
 `ifndef DPU_REG_PLAN_TYPES_SV
 `define DPU_REG_PLAN_TYPES_SV
 

@@ -1,3 +1,9 @@
+/*
+ * 所属层次：src/ VIO 寄存器计划契约层。
+ * 文件职责：定义 VIO plan policy、寄存器编码常量以及 BDF/MSIX/notify/source-id 打包函数。
+ * 主要依赖：dpu_device_types、dpu_resource_types。
+ * 所有权与生命周期：policy 由调用方配置并可复制，pack 函数无状态。
+ */
 `ifndef DPU_VIO_REG_PLAN_TYPES_SV
 `define DPU_VIO_REG_PLAN_TYPES_SV
 
@@ -54,6 +60,9 @@ typedef struct {
 
 // User-selectable lowering policy.  The policy changes how a valid snapshot
 // is represented; it never changes topology or allocates IDs.
+// 设计原因：把跨阶段解析结果和派生索引封装起来，避免消费者直接依赖可变配置。
+// 职责与所有权：对象在 freeze 前填充并拥有内部副本，freeze 后只读，查询者只能获得值复制。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vio_register_plan_policy extends uvm_object;
     `uvm_object_utils(dpu_vio_register_plan_policy)
 
@@ -79,6 +88,9 @@ class dpu_vio_register_plan_policy extends uvm_object;
     // image when stale hardware state is outside their scope.
     bit emit_full_notify_bank;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vio_register_plan_policy");
         super.new(name);
         notify_bank = 0;
@@ -96,6 +108,9 @@ class dpu_vio_register_plan_policy extends uvm_object;
         emit_full_notify_bank = 1;
     endfunction
 
+// 功能：校验对象字段之间的约束和跨字段不变量（validate）。
+// 输入/输出：输入为当前对象状态；返回 bit，并在 why 中给出首个失败原因。
+// 边界/副作用：只读检查；空键、越界、重复项或不一致组合必须拒绝。
     function bit validate(output string why);
         why = "";
         if (notify_bank > 1) begin
@@ -129,6 +144,9 @@ class dpu_vio_register_plan_policy extends uvm_object;
         return 1;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（selected_notify_bank）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     function bit selected_notify_bank(output int unsigned selected,
                                       output string why);
         if (!validate(why)) begin
@@ -145,6 +163,9 @@ endclass : dpu_vio_register_plan_policy
 // Short name retained for callers that use the plan-oriented terminology.
 typedef dpu_vio_register_plan_policy dpu_vio_reg_plan_policy;
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_source_id）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_source_id(
     input dpu_function_key_t key,
     output bit [9:0] source_id,
@@ -184,6 +205,9 @@ function automatic bit dpu_vio_pack_source_id(
     return 1;
 endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（dpu_vio_compute_srcid）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
 function automatic bit dpu_vio_compute_srcid(
     input dpu_function_key_t key,
     output int unsigned srcid,
@@ -198,6 +222,9 @@ function automatic bit dpu_vio_compute_srcid(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_bdf_entry）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_bdf_entry(
     input dpu_vio_bdf_cfg_t cfg,
     output bit [31:0] payload,
@@ -210,6 +237,9 @@ function automatic bit dpu_vio_pack_bdf_entry(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_msix_linear_entry）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_msix_linear_entry(
     input dpu_vio_msix_linear_cfg_t cfg,
     output bit [31:0] payload,
@@ -226,6 +256,9 @@ function automatic bit dpu_vio_pack_msix_linear_entry(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_msix_info_entry）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_msix_info_entry(
     input dpu_vio_msix_info_cfg_t cfg,
     output bit [31:0] payload,
@@ -248,6 +281,9 @@ function automatic bit dpu_vio_pack_msix_info_entry(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_msix_interval）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_msix_interval(
     input int unsigned rate,
     input int unsigned packet_count,
@@ -265,6 +301,9 @@ function automatic bit dpu_vio_pack_msix_interval(
     return 1;
 endfunction
 
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_notify_entry）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_notify_entry(
     input dpu_vio_notify_entry_cfg_t cfg,
     output bit [63:0] low_word,
@@ -315,6 +354,9 @@ endfunction
 // (all ones except type/reserved fields).  Keeping a pure packer here allows
 // a caller that wants a complete bank image to clear stale entries without
 // fabricating a valid queue binding.
+// 功能：把逻辑 VIO 字段按寄存器位宽打包（dpu_vio_pack_invalid_notify_entry）。
+// 输入/输出：输入为字段值和 output 寄存器值；成功返回 1，越界返回 0。
+// 边界/副作用：检查保留位和最大值，禁止把超宽字段静默截断。
 function automatic bit dpu_vio_pack_invalid_notify_entry(
     output bit [63:0] low_word,
     output bit [63:0] high_word,

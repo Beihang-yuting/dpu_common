@@ -1,3 +1,9 @@
+/*
+ * 所属层次：src/ VIO QSCH 拓扑模型层。
+ * 文件职责：描述 port/group/net/queue 的层级关系，并提供受约束的随机拓扑生成器。
+ * 主要依赖：dpu_vio_reg_plan_types、UVM object。
+ * 所有权与生命周期：配置对象拥有拓扑数组，validate 只读检查；generator 生成独立副本。
+ */
 `ifndef DPU_VIO_QSCH_TOPOLOGY_SV
 `define DPU_VIO_QSCH_TOPOLOGY_SV
 
@@ -47,6 +53,9 @@ typedef struct {
     bit valid;
 } dpu_qsch_queue_attachment_cfg_t;
 
+// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
+// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_qsch_topology_cfg extends uvm_object;
     `uvm_object_utils(dpu_qsch_topology_cfg)
 
@@ -63,6 +72,9 @@ class dpu_qsch_topology_cfg extends uvm_object;
     bit require_all_resource_qpairs;
     bit include_af_extra_queues;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_qsch_topology_cfg");
         super.new(name);
         mode = DPU_QSCH_TOPOLOGY_EXPLICIT;
@@ -75,6 +87,9 @@ class dpu_qsch_topology_cfg extends uvm_object;
         queues.delete();
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（contains_port）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     local function bit contains_port(input int unsigned port_id);
         foreach (ports[index]) begin
             if (ports[index].valid && (ports[index].port_id == port_id))
@@ -83,6 +98,9 @@ class dpu_qsch_topology_cfg extends uvm_object;
         return 0;
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（contains_group）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     local function bit contains_group(input int unsigned group_id,
                                       output int unsigned group_index);
         group_index = 0;
@@ -95,6 +113,9 @@ class dpu_qsch_topology_cfg extends uvm_object;
         return 0;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（find_net）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     local function bit find_net(input int unsigned net_id,
                                 output int unsigned net_index);
         net_index = 0;
@@ -107,6 +128,9 @@ class dpu_qsch_topology_cfg extends uvm_object;
         return 0;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（find_queue）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     local function bit find_queue(input int unsigned global_qpair_id,
                                   output int unsigned queue_index);
         queue_index = 0;
@@ -120,6 +144,9 @@ class dpu_qsch_topology_cfg extends uvm_object;
         return 0;
     endfunction
 
+// 功能：校验对象字段之间的约束和跨字段不变量（validate）。
+// 输入/输出：输入为当前对象状态；返回 bit，并在 why 中给出首个失败原因。
+// 边界/副作用：只读检查；空键、越界、重复项或不一致组合必须拒绝。
     function bit validate(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,
@@ -411,6 +438,9 @@ class dpu_qsch_topology_cfg extends uvm_object;
     endfunction
 endclass : dpu_qsch_topology_cfg
 
+// 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
+// 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_qsch_topology_generator extends uvm_object;
     `uvm_object_utils(dpu_qsch_topology_generator)
 
@@ -426,6 +456,9 @@ class dpu_qsch_topology_generator extends uvm_object;
     // still attached through the normal random selection path.
     bit require_shared_group;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_qsch_topology_generator");
         super.new(name);
         mode = DPU_QSCH_TOPOLOGY_RANDOM_VALID;
@@ -436,6 +469,9 @@ class dpu_qsch_topology_generator extends uvm_object;
         require_shared_group = 0;
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（has_id）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     local function bit has_id(input int unsigned ids[$],
                               input int unsigned candidate);
         foreach (ids[index])
@@ -444,6 +480,9 @@ class dpu_qsch_topology_generator extends uvm_object;
         return 0;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（append_unique_id）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     local function bit append_unique_id(
         ref int unsigned ids[$], input int unsigned limit
     );
@@ -470,12 +509,18 @@ class dpu_qsch_topology_generator extends uvm_object;
         return 0;
     endfunction
 
+// 功能：生成受范围约束的随机值或打乱候选顺序（bounded_random）。
+// 输入/输出：输入为随机状态、上限或候选数组；返回随机值/成功标志。
+// 边界/副作用：上限为零、状态非法或数组为空时安全返回，不产生越界 ID。
     local function int unsigned bounded_random(input int unsigned maximum);
         if (maximum == 0)
             return 0;
         return $urandom_range(maximum, 0);
     endfunction
 
+// 功能：按约束生成一份可验证的随机 QSCH 拓扑（build_random）。
+// 输入/输出：输入为随机配置上限和 seed；输出拓扑及 why，返回 bit。
+// 边界/副作用：生成结果必须满足唯一 ID、层级引用和资源上限，失败不发布半成品拓扑。
     function bit build_random(
         input dpu_device_snapshot device_snapshot,
         input dpu_resource_snapshot resource_snapshot,

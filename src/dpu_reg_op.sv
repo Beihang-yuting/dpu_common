@@ -1,6 +1,15 @@
+/*
+ * 所属层次：src/ 寄存器操作值对象层。
+ * 文件职责：描述单个 PCI config/MMIO/read-verify/poll/commit/barrier 操作及其校验规则。
+ * 主要依赖：dpu_reg_plan_types、UVM object。
+ * 所有权与生命周期：operation 由寄存器计划拥有并在复制时深拷贝依赖数组；validate 不访问硬件。
+ */
 `ifndef DPU_REG_OP_SV
 `define DPU_REG_OP_SV
 
+// 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
+// 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_reg_op extends uvm_object;
     `uvm_object_utils(dpu_reg_op)
 
@@ -27,6 +36,9 @@ class dpu_reg_op extends uvm_object;
     time retry_interval;
     string commit_group;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_reg_op");
         super.new(name);
         op_id = "";
@@ -53,10 +65,19 @@ class dpu_reg_op extends uvm_object;
         commit_group = "";
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_dependency）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     function void add_dependency(input string dependency_id);
         dependencies.push_back(dependency_id);
     endfunction
 
+// 功能：复制寄存器操作及其依赖字段（copy_fields_from）。
+// 输入/输出：输入为同型 operation；返回新副本或无返回值。
+// 边界/副作用：依赖数组和校验字段必须一起复制；不改变源操作。
+// 功能：复制计划或操作的全部字段和派生集合（copy_fields_from）。
+// 输入/输出：输入为同型源对象；无返回值或返回副本，具体由签名决定。
+// 边界/副作用：复制后不共享可变数组；源对象保持不变，空源由调用方先行拒绝。
     protected function void copy_fields_from(input dpu_reg_op rhs);
         op_id = rhs.op_id;
         dependencies = rhs.dependencies;
@@ -82,6 +103,9 @@ class dpu_reg_op extends uvm_object;
         commit_group = rhs.commit_group;
     endfunction
 
+// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
+// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
+// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_reg_op typed_rhs;
 
@@ -94,6 +118,9 @@ class dpu_reg_op extends uvm_object;
         copy_fields_from(typed_rhs);
     endfunction
 
+// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
+// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
+// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_reg_op rhs);
         if (rhs == null) begin
             `uvm_error("REG_OP_COPY", "dpu_reg_op::copy_from received null")
@@ -102,6 +129,9 @@ class dpu_reg_op extends uvm_object;
         copy(rhs);
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（copy_op）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     function dpu_reg_op copy_op(input string copy_name = "dpu_reg_op_copy");
         uvm_object cloned_object;
         dpu_reg_op copied;
@@ -116,6 +146,9 @@ class dpu_reg_op extends uvm_object;
         return copied;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（access_mask）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit [63:0] access_mask();
         case (width_bytes)
             1: return 64'h0000_0000_0000_00ff;
@@ -126,11 +159,17 @@ class dpu_reg_op extends uvm_object;
         endcase
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（is_mmio_target）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     protected function bit is_mmio_target();
         return (target_space == DPU_REG_TARGET_AF_BAR0) ||
                (target_space == DPU_REG_TARGET_FUNCTION_BAR);
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（is_canonical_barrier）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     protected function bit is_canonical_barrier();
         return (target_space == DPU_REG_TARGET_NONE) &&
                (target_block == "") &&
@@ -142,6 +181,9 @@ class dpu_reg_op extends uvm_object;
                (retry_interval === 0) && (commit_group == "");
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（validate_write_values）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit validate_write_values(
         input bit [63:0] valid_mask,
         output string why
@@ -163,6 +205,9 @@ class dpu_reg_op extends uvm_object;
         return 1;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（validate_read_values）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     protected function bit validate_read_values(
         input bit [63:0] valid_mask,
         output string why
@@ -184,6 +229,9 @@ class dpu_reg_op extends uvm_object;
         return 1;
     endfunction
 
+// 功能：校验对象字段之间的约束和跨字段不变量（validate）。
+// 输入/输出：输入为当前对象状态；返回 bit，并在 why 中给出首个失败原因。
+// 边界/副作用：只读检查；空键、越界、重复项或不一致组合必须拒绝。
     function bit validate(output string why);
         bit [63:0] valid_mask;
 

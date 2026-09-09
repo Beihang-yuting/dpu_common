@@ -1,9 +1,18 @@
+/*
+ * 所属层次：src/ 配置解析入口层。
+ * 文件职责：把 authoring 配置交给设备解析器，统一把解析结果映射为配置状态和冻结快照。
+ * 主要依赖：dpu_device_cfg、dpu_device_resolver、dpu_device_snapshot。
+ * 所有权与生命周期：只读配置并生成新的快照；失败时不修改调用方配置，也不发布半成品快照。
+ */
 `ifndef DPU_CONFIGURATION_RESOLVER_SV
 `define DPU_CONFIGURATION_RESOLVER_SV
 
 // Candidate-only coordinator for the declarative device/resource pipeline.
 // Caller-owned configurations and previously published snapshots are never
 // modified; output handles are assigned only after both snapshots freeze.
+// 设计原因：将校验、解析或计划构建从 authoring 对象中隔离，保证输出规则集中且可复用。
+// 职责与所有权：该类通常是无状态服务；输入由调用方拥有，输出快照/计划在成功返回后交给调用方。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_configuration_resolver extends uvm_object;
     `uvm_object_utils(dpu_configuration_resolver)
 
@@ -11,6 +20,9 @@ class dpu_configuration_resolver extends uvm_object;
     dpu_device_resolver device_resolver;
     dpu_resource_resolver resource_resolver;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_configuration_resolver");
         super.new(name);
         placement_normalizer = dpu_placement_normalizer::type_id::create(
@@ -21,6 +33,9 @@ class dpu_configuration_resolver extends uvm_object;
             {name, "_resource_resolver"});
     endfunction
 
+// 功能：将 authoring 配置解析为可消费的冻结快照或资源结果（resolve）。
+// 输入/输出：输入为配置/计划及输出对象；成功返回 1，失败返回 0 并填写 why/diagnostic。
+// 边界/副作用：失败不得发布半成品结果，也不得反向修改输入配置。
     function bit resolve(
         input dpu_device_cfg device_cfg,
         input dpu_resource_placement_cfg placement_cfg,

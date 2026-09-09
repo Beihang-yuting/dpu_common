@@ -1,6 +1,15 @@
+/*
+ * 所属层次：src/ 寄存器计划依赖分析层。
+ * 文件职责：收集寄存器操作，校验依赖图和 commit group，并生成稳定的拓扑执行顺序。
+ * 主要依赖：dpu_reg_op、dpu_reg_plan_types。
+ * 所有权与生命周期：plan 拥有 operation 副本；freeze 后操作列表和排序结果不可变。
+ */
 `ifndef DPU_REG_PLAN_SV
 `define DPU_REG_PLAN_SV
 
+// 设计原因：把跨阶段解析结果和派生索引封装起来，避免消费者直接依赖可变配置。
+// 职责与所有权：对象在 freeze 前填充并拥有内部副本，freeze 后只读，查询者只能获得值复制。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_reg_plan extends uvm_object;
     `uvm_object_utils(dpu_reg_plan)
 
@@ -14,12 +23,18 @@ class dpu_reg_plan extends uvm_object;
     typedef string dpu_reg_string_map_t[string];
     typedef dpu_reg_string_set_t dpu_reg_ready_map_t[int unsigned];
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_reg_plan");
         super.new(name);
         ordered_ids.delete();
         frozen = 0;
     endfunction
 
+// 功能：查询当前对象的计数、状态或最近错误文本（operation_count）。
+// 输入/输出：无输入；返回值语义结果，不修改对象。
+// 边界/副作用：空集合或尚未执行时返回定义明确的默认值。
     function int unsigned operation_count();
         return operations_by_id.num();
     endfunction
@@ -29,6 +44,9 @@ class dpu_reg_plan extends uvm_object;
     // builder can compose an existing bootstrap plan without sharing mutable
     // operation handles.  Callers that need lifecycle order should use
     // ordered_operations() after freeze().
+// 功能：按键查询内部索引或导出值复制（list_operations）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit list_operations(
         ref dpu_reg_op operations[$],
         output string why
@@ -51,6 +69,9 @@ class dpu_reg_plan extends uvm_object;
         return 1;
     endfunction
 
+// 功能：查询对象是否已经完成冻结生命周期阶段（is_frozen）。
+// 输入/输出：无输入；返回 bit，不修改对象。
+// 边界/副作用：只反映内部生命周期标志，不代替 validate/freeze。
     function bit is_frozen();
         return frozen;
     endfunction
@@ -58,6 +79,12 @@ class dpu_reg_plan extends uvm_object;
     // Dynamic operation subtypes are preserved through copy_op(). A subtype
     // that owns object-handle extension fields must deep-copy those fields in
     // do_copy(); the plan can only invoke the dynamic clone and verify its ID.
+// 功能：复制寄存器操作及其依赖字段（copy_operation）。
+// 输入/输出：输入为同型 operation；返回新副本或无返回值。
+// 边界/副作用：依赖数组和校验字段必须一起复制；不改变源操作。
+// 功能：复制计划或操作的全部字段和派生集合（copy_operation）。
+// 输入/输出：输入为同型源对象；无返回值或返回副本，具体由签名决定。
+// 边界/副作用：复制后不共享可变数组；源对象保持不变，空源由调用方先行拒绝。
     local function bit copy_operation(
         input dpu_reg_op source,
         input string expected_id,
@@ -88,6 +115,9 @@ class dpu_reg_plan extends uvm_object;
         return 1;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_operation）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     function bit add_operation(
         input dpu_reg_op operation,
         output string why
@@ -119,6 +149,9 @@ class dpu_reg_plan extends uvm_object;
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（find_operation）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit find_operation(
         input string op_id,
         output dpu_reg_op operation
@@ -132,6 +165,9 @@ class dpu_reg_plan extends uvm_object;
             operations_by_id[op_id], op_id, operation, ignored_why);
     endfunction
 
+// 功能：分析寄存器依赖图并生成稳定拓扑顺序（analyze_plan）。
+// 输入/输出：输入为 operation 集合；输出排序数组和 why，返回 bit。
+// 边界/副作用：检测未知依赖、环和重复 ID，分析阶段不执行硬件副作用。
     local function bit analyze_plan(
         ref dpu_reg_indegree_map_t indegree,
         ref dpu_reg_string_set_map_t outgoing_edges,
@@ -276,6 +312,9 @@ class dpu_reg_plan extends uvm_object;
         return 1;
     endfunction
 
+// 功能：分析寄存器依赖图并生成稳定拓扑顺序（build_topological_order）。
+// 输入/输出：输入为 operation 集合；输出排序数组和 why，返回 bit。
+// 边界/副作用：检测未知依赖、环和重复 ID，分析阶段不执行硬件副作用。
     local function bit build_topological_order(
         ref string result[$],
         ref dpu_reg_indegree_map_t indegree,
@@ -335,6 +374,9 @@ class dpu_reg_plan extends uvm_object;
         return 1;
     endfunction
 
+// 功能：分析寄存器依赖图并生成稳定拓扑顺序（analyze_and_order）。
+// 输入/输出：输入为 operation 集合；输出排序数组和 why，返回 bit。
+// 边界/副作用：检测未知依赖、环和重复 ID，分析阶段不执行硬件副作用。
     local function bit analyze_and_order(
         ref string result[$],
         output string why
@@ -355,12 +397,18 @@ class dpu_reg_plan extends uvm_object;
             result, indegree, outgoing_edges, why);
     endfunction
 
+// 功能：校验对象字段之间的约束和跨字段不变量（validate）。
+// 输入/输出：输入为当前对象状态；返回 bit，并在 why 中给出首个失败原因。
+// 边界/副作用：只读检查；空键、越界、重复项或不一致组合必须拒绝。
     function bit validate(output string why);
         string validation_order[$];
 
         return analyze_and_order(validation_order, why);
     endfunction
 
+// 功能：完成索引重建、排序和一致性校验，并把可变对象转换为只读快照（freeze）。
+// 输入/输出：输入为当前未冻结对象；返回 bit，失败通过 why/diagnostic 说明。
+// 边界/副作用：冻结成功后所有写入接口必须拒绝修改。
     function bit freeze(output string why);
         string new_order[$];
 
@@ -375,6 +423,9 @@ class dpu_reg_plan extends uvm_object;
         return 1;
     endfunction
 
+// 功能：导出 freeze 后已经完成依赖排序的寄存器操作副本（ordered_operations）。
+// 输入/输出：输入为 output 数组；返回是否可导出，不改变计划。
+// 边界/副作用：只有冻结且分析成功的计划允许导出；调用方不能通过返回数组修改内部操作。
     function bit ordered_operations(
         ref dpu_reg_op operations[$],
         output string why

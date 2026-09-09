@@ -1,3 +1,9 @@
+/*
+ * 所属层次：src/ VIO 放置值类型层。
+ * 文件职责：定义放置请求、候选、资源 profile、保留区间和诊断所需的枚举与结构体。
+ * 主要依赖：SystemVerilog 基础类型、设备键类型。
+ * 所有权与生命周期：类型采用值语义，由配置/快照对象管理生命周期，不单独分配资源。
+ */
 `ifndef DPU_PLACEMENT_TYPES_SV
 `define DPU_PLACEMENT_TYPES_SV
 

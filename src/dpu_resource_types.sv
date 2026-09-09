@@ -1,3 +1,9 @@
+/*
+ * 所属层次：src/ 资源值类型与编码辅助层。
+ * 文件职责：定义资源 profile、qpair range/binding 等值结构，并提供硬件队列偏移解码。
+ * 主要依赖：SystemVerilog 基础类型。
+ * 所有权与生命周期：类型和纯函数均为值语义；解码函数只读输入并通过返回值报告非法范围。
+ */
 // =============================================================================
 // DPU Fabric resource identities and leases
 //
@@ -26,6 +32,9 @@ localparam int unsigned DPU_DRIVER_AF_EXTRA_QUEUE_COUNT = 11;
 localparam int unsigned DPU_DRIVER_AF_ETH_PORT_COUNT = 2;
 localparam int unsigned DPU_DRIVER_AF_ETH_QUEUES_PER_PORT = 4;
 
+// 功能：执行与对象职责相关的内部辅助操作（dpu_decode_af_extra_queue_offset）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
 function automatic bit dpu_decode_af_extra_queue_offset(
     input int unsigned extra_queue_offset,
     output dpu_af_extra_queue_kind_e kind,

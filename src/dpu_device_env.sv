@@ -1,6 +1,15 @@
+/*
+ * 所属层次：src/ UVM 设备环境适配层。
+ * 文件职责：把设备快照、资源管理器和寄存器计划连接到 UVM 生命周期，协调 bootstrap/VIO 配置与 teardown。
+ * 主要依赖：dpu_device_snapshot、dpu_resource_manager、dpu_reg_executor、dpu_vio_register_plan_builder。
+ * 所有权与生命周期：env 拥有自身创建的 UVM 子对象，外部 executor/backend 仅借用；失败时保留可诊断终态。
+ */
 `ifndef DPU_DEVICE_ENV_SV
 `define DPU_DEVICE_ENV_SV
 
+// 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
+// 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_device_env_config extends uvm_object;
     `uvm_object_utils(dpu_device_env_config)
 
@@ -14,6 +23,9 @@ class dpu_device_env_config extends uvm_object;
     // here and bind it after the snapshot is resolved.
     uvm_object host_mem_pool_ref;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_device_env_config");
         super.new(name);
         device_cfg = dpu_device_cfg::type_id::create({name, "_device_cfg"});
@@ -28,6 +40,9 @@ class dpu_device_env_config extends uvm_object;
 endclass : dpu_device_env_config
 
 
+// 设计原因：隔离执行副作用和 UVM 生命周期，使上层计划不依赖具体 backend。
+// 职责与所有权：对象拥有本轮执行历史，外部 backend/topology 按接口注入并借用，失败信息由对象保留。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_device_env extends uvm_env;
     `uvm_component_utils(dpu_device_env)
 
@@ -40,6 +55,9 @@ class dpu_device_env extends uvm_env;
     protected int unsigned active_vio_notify_bank;
     protected dpu_device_state_e state;
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name, uvm_component parent);
         super.new(name, parent);
         snapshot = null;
@@ -52,6 +70,9 @@ class dpu_device_env extends uvm_env;
         state = DPU_DEVICE_UNRESOLVED;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（build_phase）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     virtual function void build_phase(uvm_phase phase);
         dpu_device_env_config cfg;
         dpu_configuration_resolver configuration_resolver;
@@ -135,22 +156,37 @@ class dpu_device_env extends uvm_env;
             );
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_snapshot）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function dpu_device_snapshot get_snapshot();
         return snapshot;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_resource_manager）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function dpu_resource_manager get_resource_manager();
         return resource_manager;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_resource_snapshot）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function dpu_resource_snapshot get_resource_snapshot();
         return resource_snapshot;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_state）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function dpu_device_state_e get_state();
         return state;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（find_vio_notify_commit_bank）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     protected function bit find_vio_notify_commit_bank(
         input dpu_reg_plan plan,
         input bit teardown,
@@ -181,6 +217,9 @@ class dpu_device_env extends uvm_env;
         return 1;
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（build_bootstrap_plan）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     function bit build_bootstrap_plan(
         output dpu_reg_plan plan,
         output string why
@@ -200,6 +239,9 @@ class dpu_device_env extends uvm_env;
         return builder.build(snapshot, plan, why);
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（apply_bootstrap）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     task apply_bootstrap(
         input dpu_reg_plan plan,
         output dpu_execution_report report
@@ -235,6 +277,9 @@ class dpu_device_env extends uvm_env;
         endcase
     endtask
 
+// 功能：执行与对象职责相关的内部辅助操作（build_vio_register_plan）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     function bit build_vio_register_plan(
         output dpu_reg_plan plan,
         output string why
@@ -257,6 +302,9 @@ class dpu_device_env extends uvm_env;
         return builder.build(snapshot, resource_snapshot, plan, why);
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（apply_vio_register_plan）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     task apply_vio_register_plan(
         input dpu_reg_plan plan,
         output dpu_execution_report report
@@ -299,6 +347,9 @@ class dpu_device_env extends uvm_env;
         endcase
     endtask
 
+// 功能：执行与对象职责相关的内部辅助操作（build_vio_teardown_plan）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     function bit build_vio_teardown_plan(
         output dpu_reg_plan plan,
         output string why
@@ -321,6 +372,9 @@ class dpu_device_env extends uvm_env;
             snapshot, resource_snapshot, plan, why);
     endfunction
 
+// 功能：执行与对象职责相关的内部辅助操作（apply_vio_teardown_plan）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
     task apply_vio_teardown_plan(
         input dpu_reg_plan plan,
         output dpu_execution_report report

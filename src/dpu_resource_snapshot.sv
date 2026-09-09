@@ -1,6 +1,15 @@
+/*
+ * 所属层次：src/ 资源解析结果快照层。
+ * 文件职责：保存 VIO qpair、AF extra queue、保留区间和反向索引，并在 freeze 后提供一致性查询。
+ * 主要依赖：dpu_normalized_placement_plan、dpu_placement_diagnostic、dpu_device_snapshot。
+ * 所有权与生命周期：拥有所有绑定和索引副本；freeze 前允许填充，freeze 后拒绝写入。
+ */
 `ifndef DPU_RESOURCE_SNAPSHOT_SV
 `define DPU_RESOURCE_SNAPSHOT_SV
 
+// 设计原因：把跨阶段解析结果和派生索引封装起来，避免消费者直接依赖可变配置。
+// 职责与所有权：对象在 freeze 前填充并拥有内部副本，freeze 后只读，查询者只能获得值复制。
+// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_resource_snapshot extends uvm_object;
     `uvm_object_utils(dpu_resource_snapshot)
 
@@ -19,6 +28,9 @@ class dpu_resource_snapshot extends uvm_object;
     protected dpu_global_id_range_t m_reserved_ranges[$];
     protected dpu_resource_pool_config_t m_profiles[$];
 
+// 功能：构造并初始化对象（new）。
+// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
+// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_resource_snapshot");
         super.new(name);
         m_frozen = 0;
@@ -26,6 +38,9 @@ class dpu_resource_snapshot extends uvm_object;
         m_device_snapshot = null;
     endfunction
 
+// 功能：按需创建或补齐诊断对象，保证失败路径可报告（ensure_diagnostic）。
+// 输入/输出：输入为 diagnostic 引用或上下文；无返回值。
+// 边界/副作用：只初始化缺失字段，不覆盖已有根因。
     protected function void ensure_diagnostic(
         output dpu_placement_diagnostic diagnostic
     );
@@ -34,6 +49,9 @@ class dpu_resource_snapshot extends uvm_object;
                 {get_name(), "_diagnostic"});
     endfunction
 
+// 功能：记录资源解析失败的错误码、文本和可选定位上下文（set_failure）。
+// 输入/输出：输入为 diagnostic、阶段、错误码和 message；无返回值。
+// 边界/副作用：只保留可诊断根因，不覆盖已有更具体错误，也不继续写入冻结对象。
     protected function void set_failure(
         output dpu_placement_diagnostic diagnostic,
         input dpu_placement_error_e error_code,
@@ -44,6 +62,9 @@ class dpu_resource_snapshot extends uvm_object;
                        message);
     endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（request_key）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
     protected function string request_key(
         input int unsigned request_id,
         input int unsigned request_pair_index
@@ -51,6 +72,9 @@ class dpu_resource_snapshot extends uvm_object;
         return $sformatf("%0d:%0d", request_id, request_pair_index);
     endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（service_local_key）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
     protected function string service_local_key(
         input dpu_service_key_t service_key,
         input int unsigned local_pair_id
@@ -59,6 +83,9 @@ class dpu_resource_snapshot extends uvm_object;
                 $sformatf(":%0d", local_pair_id)};
     endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（service_virtio_pair_key）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
     protected function string service_virtio_pair_key(
         input dpu_service_key_t service_key,
         input int unsigned virtio_pair_index
@@ -67,10 +94,16 @@ class dpu_resource_snapshot extends uvm_object;
                 $sformatf(":%0d", virtio_pair_index)};
     endfunction
 
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（global_key）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
     protected function string global_key(input int unsigned global_qpair_id);
         return $sformatf("%0d", global_qpair_id);
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（mutable）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     protected function bit mutable(output dpu_placement_diagnostic diagnostic);
         ensure_diagnostic(diagnostic);
         diagnostic.clear();
@@ -82,6 +115,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：比较两个键或范围，提供确定性的排序或兼容性判定（binding_less）。
+// 输入/输出：输入为两个值语义对象；返回 bit，不修改输入。
+// 边界/副作用：比较规则必须覆盖 domain/owner 和边界值，保证排序与资源冲突检查使用同一语义。
     protected function bit binding_less(
         input dpu_vio_qpair_binding_t lhs,
         input dpu_vio_qpair_binding_t rhs
@@ -91,6 +127,9 @@ class dpu_resource_snapshot extends uvm_object;
              (lhs.request_pair_index < rhs.request_pair_index));
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_bindings）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_bindings();
         dpu_vio_qpair_binding_t swap;
         for (int left = 0; left < m_bindings.size(); left++) begin
@@ -104,6 +143,9 @@ class dpu_resource_snapshot extends uvm_object;
         end
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_af_extra_bindings）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_af_extra_bindings();
         dpu_af_extra_queue_binding_t swap;
         for (int left = 0; left < m_af_extra_bindings.size(); left++) begin
@@ -119,6 +161,9 @@ class dpu_resource_snapshot extends uvm_object;
         end
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（rebuild_indexes）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void rebuild_indexes();
         m_request_index.delete();
         m_service_local_index.delete();
@@ -144,6 +189,9 @@ class dpu_resource_snapshot extends uvm_object;
         end
     endfunction
 
+// 功能：清理临时结果、错误状态或执行历史（clear_binding）。
+// 输入/输出：无输入或清理选项；无返回值，状态恢复初始值。
+// 边界/副作用：只清理本对象拥有的状态，清理后可按约定复用。
     protected function void clear_binding(
         output dpu_vio_qpair_binding_t binding
     );
@@ -164,6 +212,9 @@ class dpu_resource_snapshot extends uvm_object;
         binding.global_msix_vector_id = 0;
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（sort_and_merge_ranges）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void sort_and_merge_ranges(
         ref dpu_global_id_range_t ranges[$]
     );
@@ -191,6 +242,9 @@ class dpu_resource_snapshot extends uvm_object;
         ranges = result;
     endfunction
 
+// 功能：按稳定键整理集合并重建派生索引（canonicalize_reservations）。
+// 输入/输出：输入为内部或引用传入的数组；无返回值，排序结果写回数组/索引。
+// 边界/副作用：只改变表示顺序，不改变元素语义，保证快照和计划确定性。
     protected function void canonicalize_reservations(
         ref int unsigned ids[$],
         ref dpu_global_id_range_t ranges[$]
@@ -212,6 +266,9 @@ class dpu_resource_snapshot extends uvm_object;
         end
     endfunction
 
+// 功能：复制计划或操作的全部字段和派生集合（copy_plan）。
+// 输入/输出：输入为同型源对象；无返回值或返回副本，具体由签名决定。
+// 边界/副作用：复制后不共享可变数组；源对象保持不变，空源由调用方先行拒绝。
     protected function bit copy_plan(
         input dpu_normalized_placement_plan source,
         output dpu_normalized_placement_plan copied,
@@ -260,6 +317,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：校验拓扑、绑定或保留区间之间的跨对象不变量（validate_vio_service_topology）。
+// 输入/输出：输入为当前快照/计划及诊断输出；返回 bit 并写明首个冲突。
+// 边界/副作用：发现重复 global/local ID、owner 不匹配或区间重叠时必须整体失败。
     protected function bit validate_vio_service_topology(
         input dpu_device_snapshot snapshot,
         input dpu_service_key_t service_key,
@@ -317,6 +377,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：校验拓扑、绑定或保留区间之间的跨对象不变量（validate_bindings）。
+// 输入/输出：输入为当前快照/计划及诊断输出；返回 bit 并写明首个冲突。
+// 边界/副作用：发现重复 global/local ID、owner 不匹配或区间重叠时必须整体失败。
     protected function bit validate_bindings(
         input dpu_device_snapshot device_snapshot,
         output dpu_placement_diagnostic diagnostic
@@ -720,6 +783,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：设置对象的配置字段、依赖对象或错误上下文（set_normalized_plan）。
+// 输入/输出：输入为新值或外部对象；通常无返回值，字段写入当前对象。
+// 边界/副作用：必须尊重冻结边界；外部对象按约定借用或复制。
     function bit set_normalized_plan(
         input dpu_normalized_placement_plan plan,
         output dpu_placement_diagnostic diagnostic
@@ -746,6 +812,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_vio_binding）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     function bit add_vio_binding(
         input dpu_vio_qpair_binding_t binding,
         output dpu_placement_diagnostic diagnostic
@@ -789,6 +858,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：向对象加入配置项、绑定或寄存器操作（add_af_extra_queue_binding）。
+// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
+// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     function bit add_af_extra_queue_binding(
         input dpu_af_extra_queue_binding_t binding,
         output dpu_placement_diagnostic diagnostic
@@ -820,6 +892,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：完成索引重建、排序和一致性校验，并把可变对象转换为只读快照（freeze）。
+// 输入/输出：输入为当前未冻结对象；返回 bit，失败通过 why/diagnostic 说明。
+// 边界/副作用：冻结成功后所有写入接口必须拒绝修改。
     function bit freeze(
         input dpu_device_snapshot device_snapshot,
         output dpu_placement_diagnostic diagnostic
@@ -843,16 +918,25 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：查询对象是否已经完成冻结生命周期阶段（is_frozen）。
+// 输入/输出：无输入；返回 bit，不修改对象。
+// 边界/副作用：只反映内部生命周期标志，不代替 validate/freeze。
     function bit is_frozen();
         return m_frozen;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_vio_bindings）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_vio_bindings(ref dpu_vio_qpair_binding_t bindings[$]);
         bindings.delete();
         if (m_frozen)
             bindings = m_bindings;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_af_extra_queue_bindings）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_af_extra_queue_bindings(
         ref dpu_af_extra_queue_binding_t bindings[$]
     );
@@ -861,6 +945,9 @@ class dpu_resource_snapshot extends uvm_object;
             bindings = m_af_extra_bindings;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_vio_binding）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit get_vio_binding(
         input int unsigned request_id,
         input int unsigned request_pair_index,
@@ -877,6 +964,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_vio_binding_by_service_local）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit get_vio_binding_by_service_local(
         input dpu_service_key_t service_key,
         input int unsigned local_pair_id,
@@ -893,6 +983,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_vio_binding_by_service_virtio_pair）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit get_vio_binding_by_service_virtio_pair(
         input dpu_service_key_t service_key,
         input int unsigned virtio_pair_index,
@@ -909,6 +1002,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_vio_binding_by_global）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit get_vio_binding_by_global(
         input int unsigned global_qpair_id,
         output dpu_vio_qpair_binding_t binding
@@ -924,6 +1020,9 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_vio_bindings_for_service）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_vio_bindings_for_service(
         input dpu_service_key_t service_key,
         ref dpu_vio_qpair_binding_t bindings[$]
@@ -938,6 +1037,9 @@ class dpu_resource_snapshot extends uvm_object;
         end
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_vio_participants）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_vio_participants(
         ref dpu_vio_participant_target_t participants[$]
     );
@@ -954,6 +1056,9 @@ class dpu_resource_snapshot extends uvm_object;
         end
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（get_normalized_request）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit get_normalized_request(
         input int unsigned request_id,
         output dpu_normalized_vio_request request
@@ -964,12 +1069,18 @@ class dpu_resource_snapshot extends uvm_object;
         return m_plan.get_request(request_id, request);
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_reserved_global_qpair_ids）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_reserved_global_qpair_ids(ref int unsigned ids[$]);
         ids.delete();
         if (m_frozen)
             ids = m_reserved_ids;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_reserved_global_qpair_ranges）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_reserved_global_qpair_ranges(
         ref dpu_global_id_range_t ranges[$]
     );
@@ -978,6 +1089,9 @@ class dpu_resource_snapshot extends uvm_object;
             ranges = m_reserved_ranges;
     endfunction
 
+// 功能：按键查询内部索引或导出值复制（list_resource_profiles）。
+// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
+// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function void list_resource_profiles(
         ref dpu_resource_pool_config_t profiles[$]
     );
@@ -986,6 +1100,9 @@ class dpu_resource_snapshot extends uvm_object;
             profiles = m_profiles;
     endfunction
 
+// 功能：判断对象是否满足指定状态、资格或引用关系（references_device_snapshot）。
+// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
+// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     function bit references_device_snapshot(input dpu_device_snapshot snapshot);
         return m_frozen && (snapshot != null) && (snapshot == m_device_snapshot);
     endfunction
