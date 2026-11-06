@@ -2,6 +2,8 @@
  * 所属层次：src/ VIO 寄存器计划契约层。
  * 文件职责：定义 VIO plan policy、寄存器编码常量以及 BDF/MSIX/notify/source-id 打包函数。
  * 主要依赖：dpu_device_types、dpu_resource_types。
+ * 可选参数入口：load_params 显式读取 AIP；未编译 AIP 时无副作用，不在构造/复制中读取。
+ * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
  * 所有权与生命周期：policy 由调用方配置并可复制，pack 函数无状态。
  */
 `ifndef DPU_VIO_REG_PLAN_TYPES_SV
@@ -158,6 +160,99 @@ class dpu_vio_register_plan_policy extends uvm_object;
         why = "";
         return 1;
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu");
+`ifdef AIP_CMDLINE_SV
+        begin
+            int unsigned	bank;
+            `DPU_AIP_UINT(({path, ".notify"}), int unsigned, bank, this.notify_bank)
+            if (bank > 1) $fatal(1, "DPU_PARAMS: %s.notify.bank exceeds one bit", path);
+            this.notify_bank = bank;
+        end
+        begin
+            bit	auto_bank;
+            `DPU_AIP_UINT(({path, ".notify"}), bit, auto_bank, this.select_inactive_notify_bank)
+            this.select_inactive_notify_bank = auto_bank;
+        end
+        begin
+            int unsigned	notify_type;
+            string	raw_type;
+            raw_type = aip_cmdline#(int unsigned)::get_cmdline_string("type", {path, ".notify"});
+            if (aip_str::str_find(raw_type, "-") >= 0)
+                $fatal(1, "DPU_PARAMS: %s.notify.type requires an unsigned value", path);
+            aip_cmdline#(int unsigned)::get_single_value("type", {path, ".notify"},
+                this.notify_type, notify_type, `__FILE__, `__LINE__);
+            if (notify_type > 3) $fatal(1, "DPU_PARAMS: %s.notify.type exceeds two bits", path);
+            this.notify_type = notify_type;
+        end
+        begin
+            bit [63:0]	offset;
+            `DPU_AIP_UINT(({path, ".notify"}), bit [63:0], offset, this.notify_address_offset)
+            this.notify_address_offset = offset;
+        end
+        begin
+            bit	verify;
+            `DPU_AIP_UINT(({path, ".notify"}), bit, verify, this.verify_notify_writes)
+            this.verify_notify_writes = verify;
+        end
+        // retries 沿用公开名称，语义是包含首次写入在内的总尝试次数。
+        begin
+            int unsigned	retries;
+            `DPU_AIP_UINT(({path, ".notify"}), int unsigned, retries, this.notify_verify_attempts)
+            this.notify_verify_attempts = retries;
+        end
+        begin
+            bit	full_bank;
+            `DPU_AIP_UINT(({path, ".notify"}), bit, full_bank, this.emit_full_notify_bank)
+            this.emit_full_notify_bank = full_bank;
+        end
+        begin
+            bit	present;
+            bit [63:0]	interval_ns;
+            bit [127:0]	scaled_ticks;
+            time	unit_ticks;
+            `DPU_AIP_PRESENT(({path, ".notify"}), "interval_ns", present)
+            if (present) begin
+                `DPU_AIP_UINT(({path, ".notify"}), bit [63:0], interval_ns, 0)
+                // time literal 在部分模拟器中先表现为 real；先转换为 time，再做整数宽乘法。
+                unit_ticks = 1ns;
+                scaled_ticks = 128'(interval_ns) * 128'(unit_ticks);
+                if ((unit_ticks == 0) || |scaled_ticks[127:64])
+                    $fatal(1, "DPU_PARAMS: %s.notify.interval_ns cannot be represented in package time units", path);
+                notify_verify_interval = scaled_ticks[63:0];
+            end
+        end
+        begin
+            int unsigned	rate;
+            `DPU_AIP_UINT(({path, ".msix"}), int unsigned, rate, this.msix_interval_rate)
+            if (rate > 16'hffff) $fatal(1, "DPU_PARAMS: %s.msix.rate exceeds 16 bits", path);
+            this.msix_interval_rate = rate;
+        end
+        begin
+            int unsigned	packets;
+            `DPU_AIP_UINT(({path, ".msix"}), int unsigned, packets, this.msix_interval_packets)
+            if (packets > 16'hffff) $fatal(1, "DPU_PARAMS: %s.msix.packets exceeds 16 bits", path);
+            this.msix_interval_packets = packets;
+        end
+        begin
+            bit	self_mask;
+            `DPU_AIP_UINT(({path, ".msix"}), bit, self_mask, this.msix_self_mask)
+            this.msix_self_mask = self_mask;
+        end
+        begin
+            bit	emit_interval;
+            `DPU_AIP_UINT(({path, ".msix"}), bit, emit_interval, this.emit_msix_interval)
+            this.emit_msix_interval = emit_interval;
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_vio_register_plan_policy
 
 // Short name retained for callers that use the plan-oriented terminology.

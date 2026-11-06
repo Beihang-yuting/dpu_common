@@ -2,6 +2,8 @@
  * 所属层次：src/ authoring 配置模型层。
  * 文件职责：声明 Host、PCIe domain、PF/VF、service、BAR 和 AF 请求等逻辑设备配置。
  * 主要依赖：dpu_device_types、dpu_resource_types。
+ * 可选参数入口：load_params 显式读取 AIP；未编译 AIP 时无副作用，不在构造/复制中读取。
+ * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
  * 所有权与生命周期：对象由调用方编辑和拥有；resolver 复制其内容，配置冻结后不依赖原对象的后续修改。
  */
 `ifndef DPU_DEVICE_CFG_SV
@@ -59,6 +61,48 @@ class dpu_mmio_window_cfg extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu");
+`ifdef AIP_CMDLINE_SV
+        begin
+            bit	has_base;
+            bit	has_size;
+            bit [63:0]	mmio_base;
+            bit [63:0]	mmio_size;
+            bit [64:0]	end_address;
+            `DPU_AIP_PRESENT(path, "mmio_base", has_base)
+            `DPU_AIP_PRESENT(path, "mmio_size", has_size)
+            if (has_base || has_size) begin
+                // limit 是内部半开区间上界；公共参数只使用 base/size，避免端点含义不清。
+                if (!has_size && this.limit <= this.base)
+                    $fatal(1, "DPU_PARAMS: %s needs an explicit mmio_size for an empty/invalid aperture", path);
+                `DPU_AIP_UINT(path, bit [63:0], mmio_base, this.base)
+                `DPU_AIP_UINT(path, bit [63:0], mmio_size, (this.limit - this.base))
+                end_address = {1'b0, mmio_base} + {1'b0, mmio_size};
+                if (mmio_size == 0 || end_address[64])
+                    $fatal(1, "DPU_PARAMS: %s aperture size must be nonzero and base+size must fit 64 bits", path);
+                this.base = mmio_base;
+                this.limit = end_address[63:0];
+            end
+        end
+        begin
+            bit	present;
+            dpu_bar_role_e	roles[$];
+            `DPU_AIP_PRESENT(path, "roles", present)
+            if (present) begin
+                `aip_enum_queue(path, dpu_bar_role_e, roles, DPU_BAR_DEVICE_MEMORY)
+                this.allowed_roles = roles;
+            end
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_mmio_window_cfg
 
 
@@ -120,6 +164,49 @@ class dpu_pcie_domain_cfg extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu");
+`ifdef AIP_CMDLINE_SV
+        begin
+            dpu_bar_placement_policy_e	bar_policy;
+            `aip_enum(path, dpu_bar_placement_policy_e, bar_policy, this.bar_placement_policy)
+            this.bar_placement_policy = bar_policy;
+        end
+        begin
+            bit	present;
+            bit [15:0]	reserved_bdfs[$];
+            `DPU_AIP_PRESENT(path, "reserved_bdfs", present)
+            if (present) begin
+                `DPU_AIP_UNSIGNED_QUEUE(path, "reserved_bdfs")
+                `aip_int_queue(path, bit [15:0], reserved_bdfs, 0)
+                this.reserved_bdfs = reserved_bdfs;
+            end
+        end
+        // 常见单 BDF 区间使用短名；多区间保持调用方显式配置，避免按范围数量重建。
+        if (bdf_ranges.size() == 1) begin
+            bit [15:0]	bdf_first;
+            bit [15:0]	bdf_last;
+            `DPU_AIP_UINT(path, bit [15:0], bdf_first, bdf_ranges[0].first_bdf)
+            `DPU_AIP_UINT(path, bit [15:0], bdf_last, bdf_ranges[0].last_bdf)
+            if (bdf_first > bdf_last)
+                $fatal(1, "DPU_PARAMS: %s BDF range is reversed", path);
+            bdf_ranges[0].first_bdf = bdf_first;
+            bdf_ranges[0].last_bdf = bdf_last;
+        end
+        foreach (mmio_windows[index]) begin
+            if (mmio_windows[index] != null)
+                mmio_windows[index].load_params(mmio_windows.size() == 1 ? path :
+                                               $sformatf("%s.mmio%0d", path, index));
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_pcie_domain_cfg
 
 
@@ -192,6 +279,55 @@ class dpu_host_cfg extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu");
+`ifdef AIP_CMDLINE_SV
+        begin
+            int unsigned	address_width;
+            `DPU_AIP_UINT(path, int unsigned, address_width, this.address_width)
+            this.address_width = address_width;
+        end
+        begin
+            bit	has_base;
+            bit	has_size;
+            bit [63:0]	mem_base;
+            bit [63:0]	mem_size;
+            bit [64:0]	end_address;
+            `DPU_AIP_PRESENT(path, "mem_base", has_base)
+            `DPU_AIP_PRESENT(path, "mem_size", has_size)
+            if (has_base || has_size) begin
+                // limit 是内部半开区间上界；公共参数只使用 base/size，避免端点含义不清。
+                if (!has_size && this.gpa_limit <= this.gpa_base)
+                    $fatal(1, "DPU_PARAMS: %s needs an explicit mem_size for an empty/invalid aperture", path);
+                `DPU_AIP_UINT(path, bit [63:0], mem_base, this.gpa_base)
+                `DPU_AIP_UINT(path, bit [63:0], mem_size, (this.gpa_limit - this.gpa_base))
+                end_address = {1'b0, mem_base} + {1'b0, mem_size};
+                if (mem_size == 0 || end_address[64])
+                    $fatal(1, "DPU_PARAMS: %s aperture size must be nonzero and base+size must fit 64 bits", path);
+                this.gpa_base = mem_base;
+                this.gpa_limit = end_address[63:0];
+                this.has_gpa_aperture = 1;
+            end
+        end
+        begin
+            bit	use_gpa;
+            `DPU_AIP_UINT(path, bit, use_gpa, this.has_gpa_aperture)
+            this.has_gpa_aperture = use_gpa;
+        end
+        foreach (pcie_domains[index]) begin
+            if (pcie_domains[index] != null)
+                pcie_domains[index].load_params(pcie_domains.size() == 1 ? path :
+                                               $sformatf("%s.domain%0d", path, index));
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_host_cfg
 
 
@@ -246,6 +382,50 @@ class dpu_bar_request extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu.bar");
+`ifdef AIP_CMDLINE_SV
+        begin
+            dpu_bar_role_e	role;
+            `aip_enum(path, dpu_bar_role_e, role, this.role)
+            this.role = role;
+        end
+        begin
+            int unsigned	bar;
+            `DPU_AIP_UINT(path, int unsigned, bar, this.even_bar_id)
+            this.even_bar_id = bar;
+        end
+        begin
+            bit [63:0]	size;
+            `DPU_AIP_UINT(path, bit [63:0], size, this.size)
+            this.size = size;
+        end
+        begin
+            bit [63:0]	alignment;
+            `DPU_AIP_UINT(path, bit [63:0], alignment, this.alignment)
+            this.alignment = alignment;
+        end
+        begin
+            dpu_allocation_mode_e	placement;
+            `aip_enum(path, dpu_allocation_mode_e, placement, this.placement)
+            this.placement = placement;
+        end
+        begin
+            bit [63:0]	base;
+            `DPU_AIP_UINT(path, bit [63:0], base, this.pinned_base)
+            this.pinned_base = base;
+        end
+        if (placement == DPU_ALLOC_PINNED && size > (64'hffff_ffff_ffff_ffff - pinned_base))
+            $fatal(1, "DPU_PARAMS: %s BAR base+size overflows", path);
+
+`endif
+    endfunction
+
 endclass : dpu_bar_request
 
 
@@ -288,6 +468,28 @@ class dpu_service_decl extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu.service");
+`ifdef AIP_CMDLINE_SV
+        begin
+            dpu_service_kind_e	kind;
+            `aip_enum(path, dpu_service_kind_e, kind, this.service_kind)
+            this.service_kind = kind;
+        end
+        begin
+            int unsigned	instance;
+            `DPU_AIP_UINT(path, int unsigned, instance, this.service_instance_id)
+            this.service_instance_id = instance;
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_service_decl
 
 
@@ -366,6 +568,46 @@ class dpu_vf_template_cfg extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu.function");
+`ifdef AIP_CMDLINE_SV
+        begin
+            dpu_allocation_mode_e	bdf_mode;
+            `aip_enum(path, dpu_allocation_mode_e, bdf_mode, this.bdf_mode)
+            this.bdf_mode = bdf_mode;
+        end
+        begin
+            bit [15:0]	bdf;
+            `DPU_AIP_UINT(path, bit [15:0], bdf, this.pinned_bdf)
+            this.pinned_bdf = bdf;
+        end
+        begin
+            int unsigned	segment;
+            `DPU_AIP_UINT(path, int unsigned, segment, this.domain_key.segment_id)
+            this.domain_key.segment_id = segment;
+        end
+        begin
+            bit	present;
+            dpu_service_kind_e	services[$];
+            `DPU_AIP_PRESENT(path, "services", present)
+            if (present) begin
+                `aip_enum_queue(path, dpu_service_kind_e, services, DPU_SERVICE_VIO_NET)
+                this.eligible_service_kinds = services;
+            end
+        end
+        foreach (bars[index]) begin
+            if (bars[index] != null)
+                bars[index].load_params($sformatf("%s.bar%0d", path, bars[index].even_bar_id));
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_vf_template_cfg
 
 
@@ -418,6 +660,22 @@ class dpu_vf_pool_cfg extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu.vf_pool");
+`ifdef AIP_CMDLINE_SV
+        foreach (vf_templates[index]) begin
+            if (vf_templates[index] != null)
+                vf_templates[index].load_params($sformatf("%s.vf%0d", path, vf_templates[index].vf_id));
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_vf_pool_cfg
 
 
@@ -493,6 +751,46 @@ class dpu_function_cfg extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu.function");
+`ifdef AIP_CMDLINE_SV
+        begin
+            dpu_allocation_mode_e	bdf_mode;
+            `aip_enum(path, dpu_allocation_mode_e, bdf_mode, this.bdf_mode)
+            this.bdf_mode = bdf_mode;
+        end
+        begin
+            bit [15:0]	bdf;
+            `DPU_AIP_UINT(path, bit [15:0], bdf, this.pinned_bdf)
+            this.pinned_bdf = bdf;
+        end
+        begin
+            int unsigned	segment;
+            `DPU_AIP_UINT(path, int unsigned, segment, this.domain_key.segment_id)
+            this.domain_key.segment_id = segment;
+        end
+        begin
+            bit	present;
+            dpu_service_kind_e	services[$];
+            `DPU_AIP_PRESENT(path, "services", present)
+            if (present) begin
+                `aip_enum_queue(path, dpu_service_kind_e, services, DPU_SERVICE_VIO_NET)
+                this.eligible_service_kinds = services;
+            end
+        end
+        foreach (bars[index]) begin
+            if (bars[index] != null)
+                bars[index].load_params($sformatf("%s.bar%0d", path, bars[index].even_bar_id));
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_function_cfg
 
 
@@ -534,6 +832,38 @@ class dpu_af_request extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu");
+`ifdef AIP_CMDLINE_SV
+        begin
+            int unsigned	af_host;
+            `DPU_AIP_UINT(path, int unsigned, af_host, this.requester.host_id)
+            this.requester.host_id = af_host;
+        end
+        begin
+            int unsigned	af_pf;
+            `DPU_AIP_UINT(path, int unsigned, af_pf, this.requester.pf_id)
+            this.requester.pf_id = af_pf;
+        end
+        begin
+            dpu_function_kind_e	af_kind;
+            `aip_enum(path, dpu_function_kind_e, af_kind, this.requester.kind)
+            this.requester.kind = af_kind;
+        end
+        begin
+            int unsigned	af_vf;
+            `DPU_AIP_UINT(path, int unsigned, af_vf, this.requester.vf_id)
+            this.requester.vf_id = af_vf;
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_af_request
 
 
@@ -627,6 +957,21 @@ class dpu_device_cfg extends uvm_object;
         end
         copy_from(typed_rhs);
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：仅加载能力和 AF 请求；Host/函数拓扑及实例覆盖顺序由调用方负责。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu");
+`ifdef AIP_CMDLINE_SV
+        // Host/函数实例由上层 author_config 按模板复制和覆盖，不能在 aggregate 中再次读取。
+        if (dut_caps != null) dut_caps.load_params({path, ".caps"});
+        if (af_request != null) af_request.load_params(path);
+
+`endif
+    endfunction
+
 endclass : dpu_device_cfg
 
 `endif // DPU_DEVICE_CFG_SV

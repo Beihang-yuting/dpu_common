@@ -2,6 +2,8 @@
  * 所属层次：src/ VIO QSCH 拓扑模型层。
  * 文件职责：描述 port/group/net/queue 的层级关系，并提供受约束的随机拓扑生成器。
  * 主要依赖：dpu_vio_reg_plan_types、UVM object。
+ * 可选参数入口：load_params 显式读取 AIP；未编译 AIP 时无副作用，不在构造/复制中读取。
+ * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
  * 所有权与生命周期：配置对象拥有拓扑数组，validate 只读检查；generator 生成独立副本。
  */
 `ifndef DPU_VIO_QSCH_TOPOLOGY_SV
@@ -703,6 +705,48 @@ class dpu_qsch_topology_generator extends uvm_object;
         end
         return 1;
     endfunction
+
+    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
+    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
+    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
+    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
+    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    function void load_params(string	path = "dpu.qsch");
+`ifdef AIP_CMDLINE_SV
+        begin
+            dpu_qsch_topology_mode_e	mode;
+            `aip_enum(path, dpu_qsch_topology_mode_e, mode, this.mode)
+            this.mode = mode;
+        end
+        begin
+            int unsigned	max_groups;
+            `DPU_AIP_UINT(path, int unsigned, max_groups, this.max_group_nodes)
+            this.max_group_nodes = max_groups;
+        end
+        begin
+            int unsigned	max_ports;
+            `DPU_AIP_UINT(path, int unsigned, max_ports, this.max_port_nodes)
+            this.max_port_nodes = max_ports;
+        end
+        begin
+            int unsigned	max_tc;
+            `DPU_AIP_UINT(path, int unsigned, max_tc, this.max_tc_id)
+            this.max_tc_id = max_tc;
+        end
+        begin
+            bit	shared_group;
+            `DPU_AIP_UINT(path, bit, shared_group, this.require_shared_group)
+            this.require_shared_group = shared_group;
+        end
+        begin
+            bit	include_af;
+            `DPU_AIP_UINT(path, bit, include_af, this.include_af_extra_queues)
+            this.include_af_extra_queues = include_af;
+        end
+
+`endif
+    endfunction
+
 endclass : dpu_qsch_topology_generator
 
 `endif // DPU_VIO_QSCH_TOPOLOGY_SV

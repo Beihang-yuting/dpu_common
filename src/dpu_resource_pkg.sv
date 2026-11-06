@@ -19,6 +19,13 @@ package dpu_resource_pkg;
   import uvm_pkg::*;
   `include "uvm_macros.svh"
 
+  // AIP 是可选编译依赖：未加载其统一包时，所有 load_params 仍存在并为空操作。
+  // 不在这里 include AIP，避免同一类型在多个 package 中被重复定义。
+`ifdef AIP_CMDLINE_SV
+  import aip_core_pkg::*;
+  `include "dpu_aip_params.svh"
+`endif
+
   `include "dpu_device_types.sv"
   `include "dpu_placement_types.sv"
   `include "dpu_resource_types.sv"
