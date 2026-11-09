@@ -1,7 +1,7 @@
 /*
  * 所属层次：src/ VIO 放置 authoring 配置层。
  * 文件职责：声明候选过滤器、设备约束、qpair 覆盖、放置请求和诊断信息。
- * 主要依赖：dpu_device_types、dpu_vio_reg_plan_types。
+ * 主要依赖：dpu_device_types、dpu_placement_types、dpu_resource_types。
  * 可选参数入口：load_params 显式读取 AIP；未编译 AIP 时无副作用，不在构造/复制中读取。
  * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
  * 所有权与生命周期：配置对象由调用方编辑和拥有，normalizer 复制需要的字段；diagnostic 可清空复用。

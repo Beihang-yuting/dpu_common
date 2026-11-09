@@ -35,10 +35,8 @@ virtual class dpu_reg_executor extends uvm_object;
         return last_error_text;
     endfunction
 
-    // Optional topology hand-off performed by dpu_device_env after resolving
-    // the frozen snapshot.  Generic executors ignore it; concrete PCIe
-    // executors use it to translate BAR-relative register offsets at the
-    // final execution boundary.
+    // 调用方在 DPU 资源解析后显式传入冻结快照；dpu_device_env 不隐含执行计划。
+    // 通用执行器可忽略拓扑，PCIe 执行器使用它在发送边界解析 BAR 相对地址。
 // 功能：实现寄存器执行器的bind_topology接口。
 // 输入/输出：输入和返回值由函数签名定义；无额外隐式输出。
 // 边界/副作用：遵守基类生命周期约束；非法输入通过错误文本或返回值报告。

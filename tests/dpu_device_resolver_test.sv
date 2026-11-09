@@ -197,24 +197,24 @@ endclass : dpu_secondary_snapshot_publication_probe
 class dpu_device_resolver_test extends uvm_test;
     `uvm_component_utils(dpu_device_resolver_test)
 
-    dpu_device_env_config device_env_cfg;
+    dpu_env_cfg	device_env_cfg;
     dpu_device_env device_env;
-    dpu_device_env_config secondary_device_env_cfg;
+    dpu_env_cfg	secondary_device_env_cfg;
     dpu_device_env secondary_device_env;
 
     function new(string name, uvm_component parent);
         super.new(name, parent);
     endfunction
 
-    function automatic dpu_device_env_config make_device_env_fixture(
+    function automatic dpu_env_cfg make_device_env_fixture(
         input string name,
         input int unsigned request_id
     );
-        dpu_device_env_config cfg;
+        dpu_env_cfg	cfg;
         dpu_resource_pool_config_t qpair_profile;
         dpu_vio_placement_request request;
 
-        cfg = dpu_device_env_config::type_id::create(name);
+        cfg = dpu_env_cfg::type_id::create(name);
         cfg.device_cfg = make_valid_cfg();
         // Preserve the direct resolver's generic RDMA service but move VIO
         // authoring to eligibility plus explicit placement demand.
@@ -243,7 +243,7 @@ class dpu_device_resolver_test extends uvm_test;
     virtual function void build_phase(uvm_phase phase);
         super.build_phase(phase);
         device_env_cfg = make_device_env_fixture("device_env_cfg", 71);
-        uvm_config_db#(dpu_device_env_config)::set(
+        uvm_config_db#(dpu_env_cfg)::set(
             this, "device_env", "cfg", device_env_cfg
         );
         device_env = dpu_device_env::type_id::create("device_env", this);
@@ -253,7 +253,7 @@ class dpu_device_resolver_test extends uvm_test;
 
         secondary_device_env_cfg = make_device_env_fixture(
             "secondary_device_env_cfg", 72);
-        uvm_config_db#(dpu_device_env_config)::set(
+        uvm_config_db#(dpu_env_cfg)::set(
             this, "secondary_device_env", "cfg", secondary_device_env_cfg
         );
         secondary_device_env = dpu_device_env::type_id::create(

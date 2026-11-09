@@ -19,7 +19,7 @@ package dpu_resource_pkg;
   import uvm_pkg::*;
   `include "uvm_macros.svh"
 
-  // AIP 是可选编译依赖：未加载其统一包时，所有 load_params 仍存在并为空操作。
+  // AIP 是可选依赖：未加载时不读取命令行，组合 cfg 仍按默认值构造资源输入。
   // 不在这里 include AIP，避免同一类型在多个 package 中被重复定义。
 `ifdef AIP_CMDLINE_SV
   import aip_core_pkg::*;
@@ -31,7 +31,6 @@ package dpu_resource_pkg;
   `include "dpu_resource_types.sv"
   `include "dpu_placement_cfg.sv"
   `include "dpu_reg_plan_types.sv"
-  `include "dpu_vio_reg_plan_types.sv"
   `include "dpu_reg_op.sv"
   `include "dpu_reg_plan.sv"
   `include "dpu_execution_report.sv"
@@ -50,9 +49,10 @@ package dpu_resource_pkg;
   `include "dpu_resource_resolver.sv"
   `include "dpu_configuration_resolver.sv"
   `include "dpu_resource_manager.sv"
-  `include "dpu_device_bootstrap_plan_builder.sv"
-  `include "dpu_vio_dataplane_plan_extension.sv"
-  `include "dpu_vio_register_plan_builder.sv"
+  `include "dpu_bar_map.sv"
+  `include "dpu_table_types.sv"
+  `include "dpu_vio_table_types.sv"
+  `include "dpu_env_cfg.sv"
   `include "dpu_device_env.sv"
 endpackage : dpu_resource_pkg
 

@@ -1,7 +1,7 @@
 /*
  * 所属层次：src/ VIO QSCH 拓扑模型层。
  * 文件职责：描述 port/group/net/queue 的层级关系，并提供受约束的随机拓扑生成器。
- * 主要依赖：dpu_vio_reg_plan_types、UVM object。
+ * 主要依赖：dpu_device_snapshot、dpu_resource_snapshot、UVM object。
  * 可选参数入口：load_params 显式读取 AIP；未编译 AIP 时无副作用，不在构造/复制中读取。
  * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
  * 所有权与生命周期：配置对象拥有拓扑数组，validate 只读检查；generator 生成独立副本。
@@ -9,10 +9,8 @@
 `ifndef DPU_VIO_QSCH_TOPOLOGY_SV
 `define DPU_VIO_QSCH_TOPOLOGY_SV
 
-// Logical QSCH topology generation is intentionally separate from register
-// lowering.  The topology describes the relationships that verification wants
-// to explore; the driver extension later converts it to the audited Q2TC,
-// N2G, G2P, and SP/WRR table writes.
+// 逻辑拓扑描述待验证的 port/group/net/qpair 关系，本身不发送寄存器请求。
+// 当前图片版表策略由 dpu_env_cfg 显式声明；这里不依赖已经移除的旧驱动 plan extension。
 typedef enum int unsigned {
     DPU_QSCH_TOPOLOGY_EXPLICIT,
     DPU_QSCH_TOPOLOGY_RANDOM_VALID,

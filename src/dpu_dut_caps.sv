@@ -1,7 +1,7 @@
 /*
  * 所属层次：src/ DUT 能力描述层。
- * 文件职责：集中保存 BAR profile、功能上限和寄存器布局等硬件能力，供解析与计划构建复用。
- * 主要依赖：dpu_device_types、dpu_vio_reg_plan_types。
+ * 文件职责：集中保存 BAR profile 与资源/编码上限，供解析、VIO 行为及公共表校验复用。
+ * 主要依赖：dpu_device_types、dpu_resource_types。
  * 可选参数入口：load_params 显式读取 AIP；未编译 AIP 时无副作用，不在构造/复制中读取。
  * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
  * 所有权与生命周期：能力对象由调用方创建并可复制；查询接口不能反向修改能力配置。

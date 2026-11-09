@@ -1,7 +1,36 @@
 # dpu_common
 
-`dpu_common` 是 DPU 设备配置的独立 SystemVerilog/UVM 仓库。它只负责
-逻辑设备状态，不负责 PCIe 物理拓扑或具体传输后端。
+`dpu_common` 是 DPU 资源和公共 DUT 配置的 SystemVerilog/UVM 仓库。
+核心包独立于 PCIe/VIO；原生 PCIe 写表放在可选集成包中。
+
+## 当前集成入口
+
+`dpu_env_cfg` 统一拥有拓扑输入、表布局/策略、冻结资源和 BAR 查询结果；
+用户 env_cfg 直接组合它与 VIO/PCIe cfg，不再复制 project 的公共配置。
+`dpu_device_env` 只解析和发布资源。VIO 提供实际 ring/IOVA 的 `dpu_vio_queue_t`，
+DPU 按这些值生成表，不能再次分配或猜测 descriptor 地址。
+
+| 文件 | 能力 |
+| --- | --- |
+| `src/dpu_env_cfg.sv` | `load_params`、资源查询、公共/队列表生成及运行期候选 |
+| `src/dpu_table_types.sv`、`src/dpu_vio_table_types.sv` | 图片版硬件字段、布局、scope 和中性队列值 |
+| `src/dpu_bar_map.sv` | 查询实际 BAR、范围和分组日志 |
+| `integration/pcie/dpu_pcie_bar_map.sv` | 同一 BAR 对象上的 RC/Intel 路由 |
+| `integration/pcie/dpu_cfg_seq.sv` | 原生 Memory 配置、逐表扩展、AF 同步和 Notify 使能 |
+| `integration/pcie/dpu_bar_reg_seq.sv` | PF0 BAR0 相对 `reg_acc`，保持原生寄存器命令字段 |
+
+`dpu_cfg_seq` 从启动 sequencer 的 `dpu_cfg` 键取得 `dpu_env_cfg`；
+`virtio_work/integration/dpu/vio_dpu_cfg_seq.sv` 只补 VIO 的准备/导出/确认/释放。
+VIO/RDMA 每批 Notify 成功后，每个管理 BAR 写一次 `+0x80044=1`；空批次不写，失败停止。
+AF `+0x1010` 的写 magic/读状态8，以及每100次 DWORD 写同步读均保留。
+
+VIO Notify 查找基址默认来自实际队列导出的 `notify_address[60:7]`；显式 BAR/offset
+覆盖需与该地址高位一致。公共 `publish()` 要求 device/resource/BAR map 同源且已冻结，
+消息和分组检查全部成功后才发布，失败保留原有可见状态。
+
+旧 DUT bootstrap/VIO 双 bank builder 已删除。通用 `dpu_reg_plan`、executor 和
+orchestrator 仍可使用；调用方在资源解析后显式调用
+`executor.bind_topology(device_env.get_snapshot())`，不再由资源 env 隐含执行。
 
 ## 所有权边界
 
@@ -38,6 +67,14 @@ vcs -sverilog -ntb_opts uvm \
 `dpu_resource_pkg` 的实现通过 package 内的 include 按依赖顺序编译；
 因此不应再把同一批 `src/*.sv` 文件逐个加入编译命令。
 
+具体 PCIe 集成需要先编译 `dpu_resource_pkg` 和 `pcie_tl_pkg`，再显式加入：
+
+```text
+-f $DPU_COMMON_ROOT/filelists/dpu_pcie.f
+```
+
+该入口不重复编译核心，也不依赖 VIO 或参考 project。
+
 ## 快照到 PCIe
 
 调用方先解析并冻结 `dpu_device_snapshot`，再将快照交给
@@ -55,6 +92,9 @@ vcs -sverilog -ntb_opts uvm \
 
 AIP 不提供 `dpu` 到 `dpu.h0` 的层级继承。推荐顺序如下：
 
+低层 authoring 类仍可单独使用。当前参考入口 `dpu_env_cfg.load_params()` 已完成下列
+拓扑构建；VIO 再提交缓存的 service 需求。自行使用低层对象时，按以下顺序：
+
 1. 调用 `device.load_params("dpu")` 读取 caps 和 AF，先用 `caps.validate`
    检查能力是否在模型上限内，再按这些能力创建拓扑及资源输入。
 2. 创建 Host 模板及已有 domain/MMIO window，然后仅调用一次
@@ -62,7 +102,7 @@ AIP 不提供 `dpu` 到 `dpu.h0` 的层级继承。推荐顺序如下：
 3. 深复制模板到各 Host，设置其拓扑身份，再调用
    `host.load_params($sformatf("dpu.h%0d", host.host_id))`。
 4. 建立 placement 的 profiles/requests，调用
-   `placement.load_params("dpu")`；随后加载 policy 与 QSCH generator。
+   `placement.load_params("dpu")`；如需独立 QSCH topology generator，再显式加载它。
 5. 执行跨对象的整体校验与解析，成功后发布冻结快照。
 
 每次显式调用都可能消费随机参数，因此不要对同一个模板或实例重复加载。
@@ -85,15 +125,12 @@ AIP 不提供 `dpu` 到 `dpu.h0` 的层级继承。推荐顺序如下：
 | `dpu_vio_candidate_filter` / `dpu` | `host_ids/vf_ids/parent_pfs/functions` → host_ids/vf_ids/parent_pf_keys/function_keys |
 | `dpu_vio_device_constraint` / `dpu.device` | `host/pf/kind/vf/mode/qpairs`；request 对既有对象使用 `.deviceN` |
 | `dpu_vio_qpair_override` / `dpu.pair` | `index/owner_mode/owner_host/owner_pf/owner_kind/owner_vf/local_mode/local_id/global_mode/global_id`；request 对既有对象使用 `.pairN` |
-| `dpu_vio_register_plan_policy` / `dpu` | `notify.bank/auto_bank/type/offset/verify/retries/full_bank/interval_ns`；`msix.rate/packets/self_mask/emit_interval` |
 | `dpu_qsch_topology_generator` / `dpu.qsch` | `mode/max_groups/max_ports/max_tc/shared_group/include_af` |
 | `dpu_dut_caps` / `dpu.caps` | `max_hosts/max_pfs_per_host/max_vfs_per_pf/max_functions/global_msix_vector_count/mailbox_msix_vectors/af_extra_msix_vectors/af_extra_queue_count/vio_global_qpair_count/max_vio_net_qpairs_per_device/vio_notify_entries_per_bank` |
 
-`notify.retries` 沿用公共短名，实际语义是**包含首次写入的总尝试次数**。
-`notify.interval_ns` 是整数纳秒，显式乘以编译作用域中的 `1ns`，检查 `time`
-溢出；未指定时直接保留当前 `time` 值，不做单位往返。`active_notify_bank`
-属于运行观测输入，由调用方设置，不作为命令行开关。Host 的 `enabled/name`
-也不在这次参数范围内。
+当前公共写表不注册旧 `dpu.notify.bank/auto_bank/full_bank` 参数，Notify 仅单 bank。
+MSI-X 消息/间隔、VIO 表字段和管理窗口由 `dpu_env_cfg` 的 AIP 加载入口读取；
+参数路径仍为 `dpu.*`、`vio.*`。底层 Host 的 `enabled/name` 由 SV 显式设置。
 
 所有集合在没有对应参数时完整保留。显式集合参数表示一次新的集合声明，
 支持 AIP 的 `.size/.each/[i]` 及整体列表形式；未提供的元素字段使用该声明
@@ -114,7 +151,7 @@ AIP 不提供 `dpu` 到 `dpu.h0` 的层级继承。推荐顺序如下：
 +dpu.h0.mem_size=0x10000000
 ```
 
-本轮不自动创建 Host/domain/window/PF/VF/service/profile/request、逐设备约束
-或逐 qpair 覆盖对象；不读取多段 BDF 区间、reserved MMIO ranges、reserved
+上表低层 `load_params` 不自动创建拓扑、逐设备约束或逐 qpair 覆盖对象；
+`dpu_env_cfg.load_params()` 才根据 hosts/pfs_per_host/vfs_per_pf 创建默认拓扑。低层类不读取多段 BDF 区间、reserved MMIO ranges、reserved
 qpair ranges、caps BAR profiles。它们继续由调用方显式构造。未支持的集合
 参数不应传入并期待产生对象，已存在对象的加载范围以本表为准。
