@@ -14,7 +14,7 @@ class dpu_env_cfg extends uvm_object;
 	// 日常用例默认只写；调试时开启配置读回，失败则不确认资源。
 	bit	verify_readback = 0;
 
-	// QSCH 模式寄存器采用驱动偏移；SP/WRR 与 TC 权重按实际 net_id 生成。
+	// QSCH 模式寄存器采用驱动偏移；SP/WRR 与 TC 权重只按启用 TX 的 net_id 生成。
 	bit						qsch_configure_controls = 1;
 	int unsigned			qsch_mode = 0;
 	logic [63:0]			qsch_mode_offset = 'hb001c0;
@@ -111,7 +111,7 @@ class dpu_env_cfg extends uvm_object;
 	// 显式 policy 优先作为缺省值；CLI 可覆盖字段，其余 PF/VF 不猜 requester/Intel 身份。
 	extern protected function void load_function_routes();
 
-	// 以实际 qpair/net_id 和最终管理 BAR 为键合并默认调度项，覆盖所有实际消费者。
+	// 以启用 TX 的 qpair/net_id 和最终管理 BAR 为键合并默认调度项；纯 RX/空配置不依赖 QSCH。
 	// 每代从用户 catalog 重建 frozen_controls；同一地址的显式项优先，不改变其值或声明范围。
 	// 非 ETS/ETS 必须与全局模式一致；范围/布局失败在任何 VIO MMIO 写入前返回原因。
 	extern protected function bit materialize_qsch_controls(output string	why);
@@ -189,7 +189,7 @@ class dpu_env_cfg extends uvm_object;
 	);
 
 	// 驱动先按 Host/BAR 查找基址排序 Function，再在组内按 pair 编号排列；硬件行号是排序位置。
-	// 从完整已准备目录生成一次，RX/TX 共用 pair 项；global_qid 只写入 payload，不作为表行号。
+	// 从完整已准备目录生成一次，RX/TX 共用 pair 项；空目录正常成功，global_qid 不作为表行号。
 	// 默认从实际 doorbell [60:7] 取基址；显式 BAR/offset 必须命中相同高位，低七位是队列编码。
 	// 同 Host 同基址属于不同 service 时存在查找歧义，拒绝发布；失败保持目录为空。
 	extern protected function bit materialize_notify_records(output string	why);
@@ -1146,7 +1146,7 @@ function void dpu_env_cfg::load_function_routes();
 	end
 endfunction
 
-// 以实际 qpair/net_id 和最终管理 BAR 为键合并默认调度项，覆盖所有实际消费者。
+// 以启用 TX 的 qpair/net_id 和最终管理 BAR 为键合并默认调度项；纯 RX/空配置不依赖 QSCH。
 // 每代从用户 catalog 重建 frozen_controls；同一地址的显式项优先，不改变其值或声明范围。
 // 非 ETS/ETS 必须与全局模式一致；范围/布局失败在任何 VIO MMIO 写入前返回原因。
 function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
@@ -1157,11 +1157,6 @@ function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
 	frozen_controls = platform_controls;
 	why             = "";
 	if (!qsch_configure_controls) return 1;
-	if (qsch_mode > 1 || $isunknown({qsch_mode_offset, qsch_spwrr, qsch_tc_weight}) || qsch_mode_offset[1:0] != 0 || qsch_spwrr > 'hff) begin
-		why = "QSCH mode/weight width or mode register alignment is invalid";
-		return 0;
-	end
-
 	resource_snapshot.list_vio_bindings(pairs);
 	foreach (pairs[p]) begin
 		dpu_vio_policy_t	policy;
@@ -1170,17 +1165,22 @@ function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
 		string				name;
 
 		name = dpu_service_key_name(pairs[p].service_key);
-		if (!frozen_policies.exists(name)) begin
-			why = {"queue platform policy missing: ", name};
-			return 0;
-		end
-		policy = frozen_policies[name];
 		if (!services.exists(name)) begin
 			why = {"service demand missing: ", name};
 			return 0;
 		end
 		requirement = services[name];
-		if (!requirement.tx_enable) continue;
+		if (!requirement.enabled || !requirement.tx_enable) continue;
+		if (!frozen_policies.exists(name)) begin
+			why = {"queue platform policy missing: ", name};
+			return 0;
+		end
+		policy = frozen_policies[name];
+		if (qsch_mode > 1 || $isunknown({qsch_mode_offset, qsch_spwrr, qsch_tc_weight}) ||
+			qsch_mode_offset[1:0] != 0 || qsch_spwrr > 'hff) begin
+			why = "QSCH mode/weight width or mode register alignment is invalid";
+			return 0;
+		end
 		if (policy.ets != qsch_mode) begin
 			why = {"QSCH mode disagrees with service ets: ", name};
 			return 0;
@@ -2097,7 +2097,7 @@ function bit dpu_env_cfg::public_records(
 endfunction
 
 // 驱动先按 Host/BAR 查找基址排序 Function，再在组内按 pair 编号排列；硬件行号是排序位置。
-// 从完整已准备目录生成一次，RX/TX 共用 pair 项；global_qid 只写入 payload，不作为表行号。
+// 从完整已准备目录生成一次，RX/TX 共用 pair 项；空目录正常成功，global_qid 不作为表行号。
 // 默认从实际 doorbell [60:7] 取基址；显式 BAR/offset 必须命中相同高位，低七位是队列编码。
 // 同 Host 同基址属于不同 service 时存在查找歧义，拒绝发布；失败保持目录为空。
 function bit dpu_env_cfg::materialize_notify_records(output string	why);
@@ -2184,8 +2184,9 @@ function bit dpu_env_cfg::materialize_notify_records(output string	why);
 		end
 	end
 
+	// 空/单项目录无需排序；避免仿真器对未分配 queue 的 sort 报警。
 	// 低 64 位恰好为 {host_id, base_addr_60_7, local_qid_encoding}，不含 global_qid。
-	pending.sort() with (item.entry[63:0]);
+	if (pending.size() > 1) pending.sort() with (item.entry[63:0]);
 	if (pending.size() > 512) begin
 		why = "Notify single-bank image exceeds 512 rows";
 		return 0;
@@ -2216,7 +2217,8 @@ function bit dpu_env_cfg::materialize_notify_records(output string	why);
 	return 1;
 endfunction
 
-// 队列表按真实 service/qpair/IOVA 生成；任何平台策略越界都在窄字段赋值前拒绝。
+// 队列表按真实 service/qpair/IOVA 生成；QSCH 只由 TX 队列产生，RX 仍保留自身 QUEUE_AUX。
+// 未使用的方向不要求对应表布局；任何使用中的平台策略越界都在窄字段赋值前拒绝。
 function bit dpu_env_cfg::queue_records(
 	input dpu_cfg_scope		selection,
 	input dpu_table_kind_e	kinds[$],
@@ -2279,6 +2281,8 @@ function bit dpu_env_cfg::queue_records(
 				bit	found;
 
 				if (!(kinds[k] inside {DPU_TABLE_SPWRR, DPU_TABLE_TC_WEIGHT, DPU_TABLE_QUEUE_AUX}))
+					continue;
+				if (!queues[q].tx_mode && kinds[k] inside {DPU_TABLE_SPWRR, DPU_TABLE_TC_WEIGHT})
 					continue;
 				found = 0;
 				foreach (frozen_controls[c]) begin
@@ -2419,7 +2423,8 @@ function bit dpu_env_cfg::queue_records(
 			// 非 ring 表不携带 ring enable 位，独立批次与合并 verify 必须生成相同记录。
 			r.enable_mask  = 0;
 			r.enable_value = 0;
-			if (kind_selected(DPU_TABLE_Q2TC, kinds) || kind_selected(DPU_TABLE_N2G, kinds) || kind_selected(DPU_TABLE_G2P, kinds)) begin
+			if (queues[q].tx_mode && (kind_selected(DPU_TABLE_Q2TC, kinds) ||
+				kind_selected(DPU_TABLE_N2G, kinds) || kind_selected(DPU_TABLE_G2P, kinds))) begin
 				// Q2TC/N2G/G2P 编号由显式策略生成；net/group 十位先检查再赋值。
 				if (64'(policy.net_base) + 64'(queues[q].qpair.virtio_pair_index)*policy.net_stride >= 1024 ||
 				policy.group_id >= 1024 || policy.cos >= 8 || policy.eth_ports + h >= 16 ||
