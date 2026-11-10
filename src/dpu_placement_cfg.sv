@@ -626,7 +626,7 @@ endclass : dpu_resource_placement_cfg
 
 
 // 设计原因：把状态、错误上下文和结果集合统一成可复制的值对象，便于跨层传递。
-// 职责与所有权：对象拥有自身文本和结果副本，不持有 executor 或配置的可变引用。
+// 职责与所有权：对象拥有自身文本和结果副本，不持有配置的可变引用。
 // 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_placement_diagnostic extends uvm_object;
     `uvm_object_utils(dpu_placement_diagnostic)

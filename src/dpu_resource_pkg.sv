@@ -30,14 +30,6 @@ package dpu_resource_pkg;
   `include "dpu_placement_types.sv"
   `include "dpu_resource_types.sv"
   `include "dpu_placement_cfg.sv"
-  `include "dpu_reg_plan_types.sv"
-  `include "dpu_reg_op.sv"
-  `include "dpu_reg_plan.sv"
-  `include "dpu_execution_report.sv"
-  `include "dpu_reg_executor.sv"
-  `include "dpu_pcie_reg_executor.sv"
-  `include "dpu_spy_reg_executor.sv"
-  `include "dpu_config_orchestrator.sv"
   `include "dpu_dut_caps.sv"
   `include "dpu_device_cfg.sv"
   `include "dpu_normalized_placement_plan.sv"
@@ -45,7 +37,6 @@ package dpu_resource_pkg;
   `include "dpu_device_snapshot.sv"
   `include "dpu_device_resolver.sv"
   `include "dpu_resource_snapshot.sv"
-  `include "dpu_vio_qsch_topology.sv"
   `include "dpu_resource_resolver.sv"
   `include "dpu_configuration_resolver.sv"
   `include "dpu_resource_manager.sv"
@@ -54,6 +45,7 @@ package dpu_resource_pkg;
   `include "dpu_vio_table_types.sv"
   `include "dpu_env_cfg.sv"
   `include "dpu_device_env.sv"
+  `include "dpu_names.sv"
 endpackage : dpu_resource_pkg
 
 `endif // DPU_RESOURCE_PKG_SV

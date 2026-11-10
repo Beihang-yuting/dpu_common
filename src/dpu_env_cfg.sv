@@ -1,7 +1,7 @@
 // src：DPU 资源输入、唯一 BAR 视图和当前 DUT 表配置；不依赖 PCIe/VIO 类。
 // cfg 拥有 authoring/冻结表值，借用 resolver 快照；实际 ring/IOVA 由 VIO 导出并管理。
 // Host/Function/BAR 只分配一次；发布先验证同源冻结身份，失败保留旧发布值。
-// Notify 查找键取实际 doorbell 的高位；运行期刷新不改变拓扑、不自动访问 DUT。
+// Notify 查找键取实际 doorbell 的高位；运行期刷新保留 Host/PF/VF/BAR，不自动访问 DUT。
 class dpu_env_cfg extends uvm_object;
 	`uvm_object_utils(dpu_env_cfg)
 	// 默认采用驱动 VIO/QSCH/BDF/MSI-X 布局与无 IP 的 PF0 软件路由；显式平台声明优先。
@@ -20,6 +20,16 @@ class dpu_env_cfg extends uvm_object;
 	logic [63:0]			qsch_mode_offset = 'hb001c0;
 	logic [31:0]			qsch_spwrr = 'hff;
 	logic [31:0]			qsch_tc_weight = 'h11111111;
+	// 配置前生成一次 Function→net；随机只改变调度编号，保留真实队列归属。
+	// net/group 空串使用自动编号；表达式留给统一分配。图片默认 ETH0，实际 ETH 数由平台给定。
+	dpu_qsch_topology_e	qsch_topology = DPU_QSCH_AUTO;
+	string					qsch_net_id = "";
+	string					qsch_group_id = "";
+	string					qsch_dpt = "0";
+	int unsigned			qsch_eth_ports = 8;
+	bit						qsch_print = 0;
+	dpu_qsch_input_t		qsch_inputs[string];
+	dpu_qsch_net_t		qsch_nets[string];
 	dpu_table_layout_t		table_layouts[dpu_table_kind_e];
 	dpu_function_policy_t	function_policies[string];
 	dpu_vio_policy_t		vio_policies[string];
@@ -111,7 +121,44 @@ class dpu_env_cfg extends uvm_object;
 	// 显式 policy 优先作为缺省值；CLI 可覆盖字段，其余 PF/VF 不猜 requester/Intel 身份。
 	extern protected function void load_function_routes();
 
-	// 以启用 TX 的 qpair/net_id 和最终管理 BAR 为键合并默认调度项；纯 RX/空配置不依赖 QSCH。
+	// 根据实际 TX 队列生成每 Function 一个 net；同源 Host、同目的 dpt 共享 group。
+	// 已生成结果保持稳定；释放/重载后才重新生成，空或纯 RX 配置不依赖 QSCH 参数。
+	extern protected function bit materialize_qsch_topology(output string	why);
+
+	// 用 AIP 原生有限候选分析检查 10-bit 调度编号，不先抽样再截断；rand/random 表示全域。
+	// 非 AIP 构建仅供 SV 固定十进制值和 rand/random；表达式错误返回具体输入。
+	extern protected function bit qsch_candidates(
+		input string		expr,
+		output bit [1023:0]	values,
+		output string		why
+	);
+
+	// 从允许集合抽样；固定值不消费 RNG，AIP 表达式保留原权重，已用编号通过拒绝抽样排除。
+	// 有界重抽样失败时返回原因，不退回改变分布的随机结果。
+	extern protected function bit qsch_pick(
+		input string		expr,
+		input bit [1023:0]	values,
+		output int unsigned	value,
+		output string		why
+	);
+
+	// 统一分配 net/group 的唯一 ID；先处理固定/窄候选，避免随机占用显式固定编号。
+	// 失败不发布半份映射；同 route 的 group 请求在调用前合并。
+	extern protected function bit qsch_ids(
+		input string		expressions[string],
+		output int unsigned	ids[string],
+		output string		why
+	);
+
+	// 按真实队列查询同一份调度关联；MANUAL 保留原显式映射，查询本身不随机采样。
+	// 编号及硬件位宽在生成表值前检查，不能截断后再访问另一项。
+	extern function bit qsch_route(
+		input dpu_vio_queue_t	queue,
+		output dpu_qsch_net_t	route,
+		output string			why
+	);
+
+	// 以实际 TX 队列的 net_id 和最终管理 BAR 为键合并默认调度项；纯 RX/空配置不依赖 QSCH。
 	// 每代从用户 catalog 重建 frozen_controls；同一地址的显式项优先，不改变其值或声明范围。
 	// 非 ETS/ETS 必须与全局模式一致；范围/布局失败在任何 VIO MMIO 写入前返回原因。
 	extern protected function bit materialize_qsch_controls(output string	why);
@@ -595,6 +642,30 @@ function void dpu_env_cfg::load_platform_params();
 		qsch_tc_weight          = tc_weight;
 		qsch_configure_controls = configure_controls;
 	end
+	begin
+		dpu_qsch_topology_e	topology;
+		int unsigned			eth_ports;
+		bit						print;
+		string					fields[$] = '{"net_id", "group_id", "dpt"};
+
+		`aip_enum("dpu.qsch", dpu_qsch_topology_e, topology, qsch_topology)
+		`DPU_AIP_UINT("dpu.qsch", int unsigned, eth_ports, qsch_eth_ports)
+		`aip_int("dpu.qsch", bit, print, qsch_print)
+
+		qsch_topology  = topology;
+		qsch_eth_ports = eth_ports;
+		qsch_print     = print;
+		// 这里只取原文；实际 TX 集合确定后统一采样，避免全局随机值被所有 Function 共用。
+		foreach (fields[i]) begin
+			raw = aip_cmdline#(int)::get_cmdline_string(fields[i], "dpu.qsch");
+			if (raw == "") continue;
+			case (fields[i])
+				"net_id":   qsch_net_id   = raw;
+				"group_id": qsch_group_id = raw;
+				"dpt":      qsch_dpt      = raw;
+			endcase
+		end
+	end
 
 	foreach (kinds[k]) begin
 		paths.delete();
@@ -835,6 +906,27 @@ function void dpu_env_cfg::load_platform_params();
 		if (service.function_key.kind == DPU_FUNCTION_VF)
 			path = {path, $sformatf(".vf%0d", service.function_key.vf_id)};
 		paths.push_back({path, ".i0"});
+		begin
+			dpu_qsch_input_t	request;
+			string				owner;
+			string				fields[$] = '{"net_id", "group_id", "dpt"};
+
+			owner = dpu_function_key_name(service.function_key);
+			request = qsch_inputs.exists(owner) ? qsch_inputs[owner] : '{default: ""};
+			foreach (paths[i]) begin
+				if (paths[i] == "dpu") continue;
+				foreach (fields[j]) begin
+					raw = aip_cmdline#(int)::get_cmdline_string({"qsch.", fields[j]}, paths[i]);
+					if (raw == "") continue;
+					case (fields[j])
+						"net_id":   request.net_id   = raw;
+						"group_id": request.group_id = raw;
+						"dpt":      request.dpt      = raw;
+					endcase
+				end
+			end
+			qsch_inputs[owner] = request;
+		end
 		foreach (paths[i]) begin
 			raw = (paths[i] == "dpu") ? "" :
 				aip_cmdline#(string)::get_cmdline_string("prefetch_ram", paths[i]);
@@ -847,6 +939,8 @@ function void dpu_env_cfg::load_platform_params();
 				longint unsigned	value;
 				// dpu.qsch 提供全局调度策略，VIO 路径只覆盖相同字段。
 				if (paths[i] == "dpu" && aip_str::str_find(fields[j], "qsch.") != 0) continue;
+				// AUTO 的 group 由源/目的关联统一分配，不在旧 MANUAL 策略中再采样。
+				if (fields[j] == "qsch.group_id" && qsch_topology != DPU_QSCH_MANUAL) continue;
 				raw = aip_cmdline#(longint unsigned)::get_cmdline_string(fields[j], paths[i]);
 				if (raw == "") continue;
 				if (aip_str::str_find(raw, "-") >= 0)
@@ -1146,25 +1240,316 @@ function void dpu_env_cfg::load_function_routes();
 	end
 endfunction
 
-// 以启用 TX 的 qpair/net_id 和最终管理 BAR 为键合并默认调度项；纯 RX/空配置不依赖 QSCH。
+// 有限候选分析复用 AIP，不实现第二套范围/列表/权重解析器。
+// 10-bit mask 只用于检查容量和已用 ID；真正的随机抽样仍由原表达式决定。
+function bit dpu_env_cfg::qsch_candidates(
+	input string		expr,
+	output bit [1023:0]	values,
+	output string		why
+);
+	values = '0;
+	why = {"QSCH expects IDs in 0..1023, fixed/rand or a finite AIP expression: ", expr};
+	if (expr.tolower() inside {"rand", "random"}) begin
+		values = '1;
+		why = "";
+		return 1;
+	end
+`ifdef AIP_CMDLINE_SV
+	begin
+		string		tokens[$];
+		aip_svec_t	id;
+
+		aip_strict_int_queue_runtime#(longint)::validate_expr(expr, "dpu.qsch");
+		if (aip_struct_runtime::finite_candidate_tokens(expr, tokens) <= 0) return 0;
+		foreach (tokens[i]) begin
+			if (!aip_struct_runtime::finite_int_literal(tokens[i], id) || id < 0 || id >= 1024)
+				return 0;
+			values[int'(id)] = 1;
+		end
+	end
+`else
+	begin
+		longint	id;
+		string	tail;
+
+		if ($sscanf(expr, "%d%s", id, tail) != 1 || id < 0 || id >= 1024) return 0;
+		values[int'(id)] = 1;
+	end
+`endif
+	why = "";
+	return 1;
+endfunction
+
+// 已用 ID 不再参与分配；单候选直接采用，rand 从剩余集合等概率选择。
+// AIP 范围/列表/权重按原规则抽样，只拒绝已用值，不把有权重表达式改成均匀分布。
+function bit dpu_env_cfg::qsch_pick(
+	input string		expr,
+	input bit [1023:0]	values,
+	output int unsigned	value,
+	output string		why
+);
+	int unsigned	available[$];
+
+	for (int unsigned	id = 0; id < 1024; id++)
+		if (values[id]) available.push_back(id);
+	why = {"QSCH has no unused ID for expression: ", expr};
+	if (available.size() == 0) return 0;
+	if (available.size() == 1) begin
+		value = available[0];
+	end else if (expr.tolower() inside {"rand", "random"}) begin
+		value = available[$urandom_range(available.size()-1)];
+	end else begin
+`ifdef AIP_CMDLINE_SV
+		for (int	attempt = 0; attempt < 65536; attempt++) begin
+			value = aip_cmdline#(int unsigned)::parse_value(expr);
+			if (value < 1024 && values[value]) begin
+				why = "";
+				return 1;
+			end
+		end
+`endif
+		why = {"QSCH exhausted draws for unused candidates: ", expr};
+		return 0;
+	end
+	why = "";
+	return 1;
+endfunction
+
+// 先分配候选少的请求（含固定值），再随机分配较宽请求；net 与 group 共用此规则。
+// 所有分配在局部完成，碰撞/容量不足返回具体键，调用方不发布部分拓扑。
+function bit dpu_env_cfg::qsch_ids(
+	input string		expressions[string],
+	output int unsigned	ids[string],
+	output string		why
+);
+	bit [1023:0]	domains[string];
+	bit [1023:0]	used;
+
+	ids.delete();
+	used = '0;
+	foreach (expressions[key]) begin
+		if (!qsch_candidates(expressions[key], domains[key], why)) begin
+			why = {key, ": ", why};
+			return 0;
+		end
+	end
+	while (ids.num() < expressions.num()) begin
+		string			key;
+		int				count;
+		int unsigned	id;
+
+		count = 1025;
+		foreach (domains[k]) begin
+			if (!ids.exists(k) && $countones(domains[k] & ~used) < count) begin
+				key   = k;
+				count = $countones(domains[k] & ~used);
+			end
+		end
+		if (!qsch_pick(expressions[key], domains[key] & ~used, id, why)) begin
+			why = {key, ": ", why};
+			return 0;
+		end
+		ids[key] = id;
+		used[id] = 1;
+	end
+	why = "";
+	return 1;
+endfunction
+
+// 按实际 TX Function 生成一次关联，固定值无需 RANDOM 模式，未指定编号采用 AUTO 默认。
+// 图片版目的节点：ETH 从 0 开始，HOST 紧跟实际 ETH 数；只允许快照中存在的 HOST0..4。
+// 同源 Host+dpt 合并 group，VNET lvl2 始终是源 Host；纯 RX/空配置不要求 QSCH。
+function bit dpu_env_cfg::materialize_qsch_topology(output string	why);
+	dpu_function_key_t	owners[string];
+	dpu_qsch_net_t		pending[string];
+	dpu_host_info_t		host_info[$];
+	string				net_exprs[string];
+	string				group_exprs[string];
+	string				route_keys[string];
+	int unsigned		net_ids[string];
+	int unsigned		group_ids[string];
+	bit [1023:0]		legal_dpt;
+	bit					reuse;
+
+	why = "";
+	if (qsch_topology == DPU_QSCH_MANUAL) begin
+		qsch_nets.delete();
+		return 1;
+	end
+	foreach (queues_by_host[h]) begin
+		foreach (queues_by_host[h][q]) begin
+			dpu_vio_queue_t	queue;
+
+			queue = queues_by_host[h][q];
+			if (queue.tx_mode)
+				owners[dpu_function_key_name(queue.service_key.function_key)] = queue.service_key.function_key;
+		end
+	end
+	if (owners.num() == 0) begin
+		qsch_nets.delete();
+		return 1;
+	end
+	if (!(qsch_topology inside {DPU_QSCH_AUTO, DPU_QSCH_RANDOM}) || qsch_mode != 0) begin
+		why = "automatic/random QSCH topology requires VNET mode (dpu.qsch.mode=0)";
+		return 0;
+	end
+	if (qsch_eth_ports == 0 || qsch_eth_ports > 8) begin
+		why = "dpu.qsch.eth_ports must be 1..8 (picture node encoding)";
+		return 0;
+	end
+
+	reuse = qsch_nets.num() == owners.num();
+	foreach (owners[name]) begin
+		if (owners[name].host_id >= 5) begin
+			why = {"QSCH VNET Host exceeds the declared level-2 encoding: ", name};
+			return 0;
+		end
+		if (!qsch_nets.exists(name)) reuse = 0;
+	end
+	if (reuse) return 1;
+
+	legal_dpt = '0;
+	for (int unsigned	port = 0; port < qsch_eth_ports; port++) legal_dpt[port] = 1;
+	device_snapshot.list_hosts(host_info);
+	foreach (host_info[i])
+		if (host_info[i].enabled && host_info[i].host_id < 5)
+			legal_dpt[qsch_eth_ports + host_info[i].host_id] = 1;
+
+	foreach (owners[name]) begin
+		dpu_qsch_input_t	request;
+		dpu_qsch_net_t	net;
+		bit [1023:0]	destinations;
+		string			route;
+		int unsigned	default_net;
+
+		request = qsch_inputs.exists(name) ? qsch_inputs[name] : '{default: ""};
+		if (request.net_id == "") request.net_id = qsch_net_id;
+		if (request.dpt == "") request.dpt = qsch_dpt;
+		if (!qsch_candidates(request.dpt, destinations, why)) return 0;
+		if (request.dpt.tolower() inside {"rand", "random"}) destinations = legal_dpt;
+		if ((destinations & ~legal_dpt) != 0) begin
+			why = {name, ": QSCH dpt includes a reserved or absent ETH/Host node: ", request.dpt};
+			return 0;
+		end
+		if (!qsch_pick(request.dpt, destinations, net.dpt, why)) return 0;
+		net.owner   = owners[name];
+		net.lvl2_id = net.owner.host_id;
+		route = $sformatf("h%0d.dpt%0d", net.owner.host_id, net.dpt);
+		route_keys[name] = route;
+		if (!device_snapshot.get_global_function_id(net.owner, default_net, why)) return 0;
+		if (request.net_id == "") request.net_id = qsch_topology == DPU_QSCH_RANDOM ?
+			"rand" : $sformatf("%0d", default_net);
+		net_exprs[name] = request.net_id;
+		// 同 route 只保存一个明确 group 约束；默认值最后补，不覆盖其他 Function 的显式输入。
+		if (request.group_id != "") begin
+			if (group_exprs.exists(route) && group_exprs[route] != request.group_id) begin
+				why = {route, ": conflicting group_id expressions for the same source/destination"};
+				return 0;
+			end
+			group_exprs[route] = request.group_id;
+		end
+		pending[name] = net;
+	end
+	foreach (pending[name]) begin
+		if (!group_exprs.exists(route_keys[name]))
+			group_exprs[route_keys[name]] = qsch_group_id != "" ? qsch_group_id :
+				qsch_topology == DPU_QSCH_RANDOM ? "rand" :
+				$sformatf("%0d", pending[name].owner.host_id * 16 + pending[name].dpt);
+	end
+	if (!qsch_ids(net_exprs, net_ids, why) || !qsch_ids(group_exprs, group_ids, why)) return 0;
+	foreach (pending[name]) begin
+		pending[name].net_id   = net_ids[name];
+		pending[name].group_id = group_ids[route_keys[name]];
+	end
+	qsch_nets = pending;
+	`uvm_info("DPU_QSCH", $sformatf("topology=%s functions/nets=%0d groups=%0d",
+		qsch_topology.name(), qsch_nets.num(), group_ids.num()), UVM_LOW)
+	foreach (qsch_nets[name]) begin
+		string	members;
+
+		members = "";
+		foreach (queues_by_host[h]) begin
+			foreach (queues_by_host[h][q]) begin
+				dpu_vio_queue_t	queue;
+
+				queue = queues_by_host[h][q];
+				if (queue.tx_mode && dpu_function_key_name(queue.service_key.function_key) == name)
+					members = {members, $sformatf(" pair%0d/qid%0d", queue.qpair.virtio_pair_index,
+						queue.qpair.global_qpair_id)};
+			end
+		end
+		`uvm_info("DPU_QSCH", $sformatf("%s net=%0d group=%0d dpt=%0d lvl2=%0d:%s",
+			name, qsch_nets[name].net_id, qsch_nets[name].group_id,
+			qsch_nets[name].dpt, qsch_nets[name].lvl2_id, members), qsch_print ? UVM_LOW : UVM_HIGH)
+	end
+	return 1;
+endfunction
+
+// 查询已生成关联供 Q2TC/N2G/G2P/SPWRR/TC_WEIGHT 共用；不在读表/写表时再次随机。
+// MANUAL 沿用原 service 基数/步长与端口公式；所有模式均在窄字段编码前验证范围。
+function bit dpu_env_cfg::qsch_route(
+	input dpu_vio_queue_t	queue,
+	output dpu_qsch_net_t	route,
+	output string			why
+);
+	dpu_vio_policy_t	policy;
+	string				service;
+	string				name;
+	logic [63:0]		net_id;
+
+	service = dpu_service_key_name(queue.service_key);
+	name    = dpu_function_key_name(queue.service_key.function_key);
+	why     = {"queue platform policy missing: ", service};
+	if (!frozen_policies.exists(service)) return 0;
+	policy = frozen_policies[service];
+	if (qsch_topology == DPU_QSCH_MANUAL) begin
+		net_id = 64'(policy.net_base) + 64'(queue.qpair.virtio_pair_index) * policy.net_stride;
+		if (net_id >= 1024 || policy.group_id >= 1024 || policy.eth_ports == 0 ||
+			policy.eth_ports > 8 || queue.service_key.function_key.host_id >= 5 ||
+			(policy.ets && policy.ets_priority >= 8)) begin
+			why = {"manual QSCH topology exceeds declared encoding: ", service};
+			return 0;
+		end
+		route.owner    = queue.service_key.function_key;
+		route.net_id   = int'(net_id);
+		route.group_id = policy.group_id;
+		route.dpt      = policy.eth_ports + route.owner.host_id;
+		route.lvl2_id  = policy.ets ? policy.ets_priority : route.owner.host_id;
+	end else begin
+		why = {"QSCH Function has no generated net: ", name};
+		if (!qsch_nets.exists(name)) return 0;
+		route = qsch_nets[name];
+	end
+	if (policy.cos >= 8 || queue.qpair.global_qpair_id >= 1024) begin
+		why = {"QSCH COS or global qpair exceeds declared encoding: ", service};
+		return 0;
+	end
+	why = "";
+	return 1;
+endfunction
+
+// 以实际 TX 队列的 net_id 和最终管理 BAR 为键合并默认调度项；纯 RX/空配置不依赖 QSCH。
 // 每代从用户 catalog 重建 frozen_controls；同一地址的显式项优先，不改变其值或声明范围。
 // 非 ETS/ETS 必须与全局模式一致；范围/布局失败在任何 VIO MMIO 写入前返回原因。
 function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
-	dpu_vio_qpair_binding_t	pairs[$];
+	dpu_vio_queue_t		queues[$];
 	dpu_table_kind_e		kinds[$] = '{DPU_TABLE_SPWRR, DPU_TABLE_TC_WEIGHT};
 	bit						automatic_item[int];
 
 	frozen_controls = platform_controls;
 	why             = "";
 	if (!qsch_configure_controls) return 1;
-	resource_snapshot.list_vio_bindings(pairs);
-	foreach (pairs[p]) begin
+	foreach (queues_by_host[h]) begin
+		foreach (queues_by_host[h][q])
+		if (queues_by_host[h][q].tx_mode) queues.push_back(queues_by_host[h][q]);
+	end
+	foreach (queues[p]) begin
 		dpu_vio_policy_t	policy;
 		dpu_vio_service_t	requirement;
-		logic [63:0]		net_id;
+		dpu_qsch_net_t		route;
 		string				name;
 
-		name = dpu_service_key_name(pairs[p].service_key);
+		name = dpu_service_key_name(queues[p].service_key);
 		if (!services.exists(name)) begin
 			why = {"service demand missing: ", name};
 			return 0;
@@ -1185,18 +1570,14 @@ function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
 			why = {"QSCH mode disagrees with service ets: ", name};
 			return 0;
 		end
-		net_id = 64'(policy.net_base) + 64'(pairs[p].virtio_pair_index) * policy.net_stride;
-		if (net_id >= 1024) begin
-			why = {"QSCH net_id exceeds 10 bits: ", name};
-			return 0;
-		end
+		if (!qsch_route(queues[p], route, why)) return 0;
 
 		foreach (kinds[k]) begin
 			dpu_control_cfg_t	item;
 			int					match;
 
-			item.owner = pairs[p].service_key.function_key;
-			if (!make_context(kinds[k], item.owner, int'(net_id), 0, item.ctx, why)) return 0;
+			item.owner = queues[p].service_key.function_key;
+			if (!make_context(kinds[k], item.owner, route.net_id, 0, item.ctx, why)) return 0;
 			match = -1;
 			foreach (frozen_controls[c]) begin
 				dpu_table_ctx_t	ctx;
@@ -1218,7 +1599,7 @@ function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
 			end
 
 			if (match == -1) begin
-				item.consumers = '{pairs[p].service_key};
+				item.consumers = '{queues[p].service_key};
 				item.consumers_complete = 1;
 				item.value = kinds[k] == DPU_TABLE_SPWRR ? 128'(qsch_spwrr) : 128'(qsch_tc_weight);
 				item.writable_mask = kinds[k] == DPU_TABLE_SPWRR ? 128'hff : 128'hffffffff;
@@ -1232,7 +1613,7 @@ function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
 					if (dpu_service_key_name(frozen_controls[match].consumers[c]) == name)
 						found = 1;
 				end
-				if (!found) frozen_controls[match].consumers.push_back(pairs[p].service_key);
+				if (!found) frozen_controls[match].consumers.push_back(queues[p].service_key);
 			end
 		end
 	end
@@ -2232,7 +2613,6 @@ function bit dpu_env_cfg::queue_records(
 	int unsigned			depth;
 	int unsigned			pre_count;
 	int unsigned			pre_start;
-	int unsigned			net_id;
 	int unsigned			index;
 	string					service;
 
@@ -2425,21 +2805,16 @@ function bit dpu_env_cfg::queue_records(
 			r.enable_value = 0;
 			if (queues[q].tx_mode && (kind_selected(DPU_TABLE_Q2TC, kinds) ||
 				kind_selected(DPU_TABLE_N2G, kinds) || kind_selected(DPU_TABLE_G2P, kinds))) begin
-				// Q2TC/N2G/G2P 编号由显式策略生成；net/group 十位先检查再赋值。
-				if (64'(policy.net_base) + 64'(queues[q].qpair.virtio_pair_index)*policy.net_stride >= 1024 ||
-				policy.group_id >= 1024 || policy.cos >= 8 || policy.eth_ports + h >= 16 ||
-				policy.eth_ports == 0 || (policy.ets && policy.ets_priority >= 8) || (!policy.ets && h >= 5) ||
-				queues[q].qpair.global_qpair_id >= 1024) begin
-					why = "QSCH topology exceeds declared screenshot encoding";
-					return 0;
-				end
-				net_id = policy.net_base + queues[q].qpair.virtio_pair_index * policy.net_stride;
+				dpu_qsch_net_t	route;
+
+				// 同 Function 的全部队列使用同一生成结果；手工模式也经同一范围检查。
+				if (!qsch_route(queues[q], route, why)) return 0;
 				if (kind_selected(DPU_TABLE_Q2TC, kinds)) begin
 					dpu_qsch_q2tc_entry_t	e;
 
 					e        = '0;
 					e.valid  = 1;
-					e.net_id = net_id;
+					e.net_id = route.net_id;
 					e.cos    = policy.cos;
 					r.entry  = e;
 					if (!make_context(
@@ -2459,9 +2834,9 @@ function bit dpu_env_cfg::queue_records(
 
 					e          = '0;
 					e.valid    = 1;
-					e.group_id = policy.group_id;
+					e.group_id = route.group_id;
 					r.entry    = e;
-					if (!make_context(DPU_TABLE_N2G, r.owner, net_id, 0, r.ctx, why)) return 0;
+					if (!make_context(DPU_TABLE_N2G, r.owner, route.net_id, 0, r.ctx, why)) return 0;
 					selected.push_back(r);
 				end
 				if (kind_selected(DPU_TABLE_G2P, kinds)) begin
@@ -2469,10 +2844,10 @@ function bit dpu_env_cfg::queue_records(
 
 					e         = '0;
 					e.valid   = 1;
-					e.dpt     = policy.eth_ports + h;
-					e.lvl2_id = policy.ets ? policy.ets_priority : h;
+					e.dpt     = route.dpt;
+					e.lvl2_id = route.lvl2_id;
 					r.entry   = e;
-					if (!make_context(DPU_TABLE_G2P, r.owner, policy.group_id, 0, r.ctx, why))
+					if (!make_context(DPU_TABLE_G2P, r.owner, route.group_id, 0, r.ctx, why))
 						return 0;
 					selected.push_back(r);
 				end
@@ -2595,6 +2970,13 @@ function bit dpu_env_cfg::make_runtime_candidate(
 	candidate.qsch_mode_offset        = qsch_mode_offset;
 	candidate.qsch_spwrr              = qsch_spwrr;
 	candidate.qsch_tc_weight          = qsch_tc_weight;
+	candidate.qsch_topology           = qsch_topology;
+	candidate.qsch_net_id             = qsch_net_id;
+	candidate.qsch_group_id           = qsch_group_id;
+	candidate.qsch_eth_ports          = qsch_eth_ports;
+	candidate.qsch_inputs             = qsch_inputs;
+	candidate.qsch_dpt                = qsch_dpt;
+	candidate.qsch_print              = qsch_print;
 	candidate.table_layouts           = table_layouts;
 	candidate.function_policies       = function_policies;
 	candidate.vio_policies            = vio_policies;
@@ -2644,6 +3026,14 @@ function void dpu_env_cfg::apply_runtime_candidate(input dpu_env_cfg	candidate);
 	qsch_mode_offset        = candidate.qsch_mode_offset;
 	qsch_spwrr              = candidate.qsch_spwrr;
 	qsch_tc_weight          = candidate.qsch_tc_weight;
+	qsch_topology           = candidate.qsch_topology;
+	qsch_net_id             = candidate.qsch_net_id;
+	qsch_group_id           = candidate.qsch_group_id;
+	qsch_eth_ports          = candidate.qsch_eth_ports;
+	qsch_inputs             = candidate.qsch_inputs;
+	qsch_dpt                = candidate.qsch_dpt;
+	qsch_print              = candidate.qsch_print;
+	qsch_nets.delete();
 	table_layouts           = candidate.table_layouts;
 	vio_policies            = candidate.vio_policies;
 	msix_policies           = candidate.msix_policies;
@@ -2868,7 +3258,7 @@ function bit dpu_env_cfg::set_queues(
 	end
 	queues_by_host  = pending;
 	frozen_policies = vio_policies;
-	return materialize_qsch_controls(why) && materialize_notify_records(why);
+	return materialize_qsch_topology(why) && materialize_qsch_controls(why) && materialize_notify_records(why);
 endfunction
 
 // 核对当前已导出的实际队列，拒绝释放后旧记录；VIO 的启停/确认仍由 VIO 管理。
@@ -2894,6 +3284,8 @@ function void dpu_env_cfg::clear_host_queues(input int unsigned	host_id);
 	string	remove_keys[$];
 
 	queues_by_host.delete(host_id);
+	foreach (qsch_nets[name])
+	if (qsch_nets[name].owner.host_id == host_id) qsch_nets.delete(name);
 	for (int	i = notify_records.size() - 1; i >= 0; i--)
 	if (notify_records[i].owner.host_id == host_id) notify_records.delete(i);
 	foreach (records[name]) begin

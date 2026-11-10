@@ -99,7 +99,34 @@ typedef struct {
 	dpu_vio_notify_entry_t	entry;
 } dpu_vio_notify_cfg_t;
 
-// 队列平台策略按 service 给出；pair 映射可用显式基数/步长生成，冻结后不可重新采样。
+// AUTO/RANDOM 均保持每个启用 TX 的 Function 对应一个 net；MANUAL 使用原显式策略。
+// 这里只选择配置前的生成规则，不改变硬件 VNET/ETS 模式，也不支持运行中改配。
+typedef enum int unsigned {
+	DPU_QSCH_AUTO,
+	DPU_QSCH_RANDOM,
+	DPU_QSCH_MANUAL
+} dpu_qsch_topology_e;
+
+// Function 的调度输入保留 AIP 表达式，直到实际 TX 集合确定后统一分配唯一编号。
+// 空字段继承全局输入；固定值不随机，随机表达式不能在 seq 查询时再次采样。
+typedef struct {
+	string	net_id;
+	string	group_id;
+	string	dpt;
+} dpu_qsch_input_t;
+
+// cfg 保存的 Function→net→group 结果；net_id 是调度编号，不是 BDF、PF 编号或 BAR。
+// 同 Function 的全部 TX 队列引用同一项；相同源 Host、目的 dpt 的 net 共享一个 group。
+typedef struct {
+	dpu_function_key_t	owner;
+	int unsigned		net_id;
+	int unsigned		group_id;
+	int unsigned		dpt;
+	int unsigned		lvl2_id;
+} dpu_qsch_net_t;
+
+// 队列平台策略按 service 给出；MANUAL 使用 net_base/net_stride/group_id/eth_ports/ets。
+// AUTO/RANDOM 的编号来自 cfg.qsch_nets；COS 仍由本 service 的显式策略控制。
 // VRX RAM 是 descriptor 槽，域名表示实际共享 RAM；不同 Host 相同域仍检查非重叠。
 typedef struct {
 	dpu_service_key_t	service_key;

@@ -24,20 +24,107 @@ DPU 按这些值生成表，不能再次分配或猜测 descriptor 地址。
 VIO/RDMA 每批 Notify 成功后，每个管理 BAR 写一次 `+0x80044=1`；空批次不写，失败停止。
 AF `+0x1010` 的写 magic/读状态8，以及每100次 DWORD 写同步读均保留。
 
+## QSCH 参数与实际写表
+
+先创建 Host/PF/VF，再由 VIO 按每个 Function 的 `pairs` 申请实际队列。
+`dpu_env_cfg.set_queues()` 接收实际队列后生成一次映射：一个有 TX 队列的 PF/VF
+对应一个 net；同 Function 的全部 TX 队列共享它。同源 Host、同目的 dpt 的 net
+共享一个 group。未启用或仅 RX 的 Function 不生成 QSCH 表。
+
+默认 `DPU_QSCH_AUTO`，未指定 net_id 时取冻结 `global_function_id`，未指定
+group_id 时取 `host_id*16+dpt`。固定值直接生效，不需要开启随机模式：
+
+```text
++dpu.qsch.net_id=100 +dpu.qsch.group_id=20
++dpu.qsch.dpt=0 +dpu.qsch.cos=3 +dpu.qsch.print=1
+```
+
+以上全局固定 net_id 适用于一个活动 TX Function；多个 PF/VF 必须给不同 net，
+或统一提供随机候选。随机也不需要切换 topology：
+
+```text
++dpu.qsch.net_id=[100:400]
++dpu.qsch.group_id=random
++dpu.qsch.dpt=0 +dpu.qsch.print=1
++ntb_random_seed=17
+```
+
+`rand` 与 `random` 等价；范围、列表等有限整数表达式复用 AIP 解析。net/group 均为
+0..1023，唯一分配先保留固定值，再处理随机候选。候选不足/冲突会在 QSCH 写表前返回原因。
+`DPU_QSCH_RANDOM` 只把未指定的 net/group 默认改为 rand，显式参数仍优先。
+旧 `net_min/net_max` 已替换为单个 `net_id` 表达式。
+
+覆盖顺序为 `dpu.qsch.* → vio.qsch.* → vio.hH.qsch.* →
+vio.hH.pfP[.vfV].i0.qsch.*`。例如同 Host 的 PF0 发向 ETH0，PF1 发向 HOST0：
+
+```text
++vio.h0.pf0.i0.qsch.net_id=100 +vio.h0.pf0.i0.qsch.group_id=20
++vio.h0.pf0.i0.qsch.dpt=0
++vio.h0.pf1.i0.qsch.net_id=200 +vio.h0.pf1.i0.qsch.group_id=30
++vio.h0.pf1.i0.qsch.dpt=8
++dpu.qsch.eth_ports=8
+```
+
+目的节点按 **94.png**：默认 ETH 数为8（按实际 DUT 用 `dpu.qsch.eth_ports` 修改，1..8），
+ETHn 编码为 n，HOSTh 编码为 `eth_ports+h`。例如2个 ETH 时 HOST0=2、HOST1=3；
+只能指定当前快照中存在的 HOST0..4。默认 `dpt=0` 为 ETH0，13..15 不采用驱动旧版
+FWD_MODE 定义。`dpt=random` 仅在当前有效 ETH/Host 节点中选择，也可以提供固定值或范围。
+G2P 的 `lvl2_id` 始终为**源** Host；它不是目的 Host。一个 Function 当前对应一个目的节点，
+同 route 的 group 参数应一致，不同 route 不得强制共用 group。
+VTX `sport/sport_id` 和 VRX `dport/dport_id` 仍取真实 Host/Function 路由，net 随机不会改变它们。
+
+生成结果保存在 `cfg.qsch_nets[dpu_function_key_name(key)]`，类型 `dpu_qsch_net_t`
+包含 `owner/net_id/group_id/dpt/lvl2_id`。`qsch_route(queue, route, why)` 查询同一份结果。
+`+dpu.qsch.print=1` 打印 Function→net→group→dpt 及 pair/global_qid，默认明细为 UVM_HIGH。
+同一种子及同一执行流程可复现；查询、导出和 seq 不重新随机。
+
+| 配置 seq 消费的表 | 索引 | 参数/数据来源 |
+| --- | --- | --- |
+| Q2TC | 实际 global_qpair_id | net_id、service COS |
+| N2G | net_id | group_id |
+| G2P | group_id | dpt、源 host_id |
+| SPWRR / TC_WEIGHT | net_id | `dpu.qsch.spwrr/tc_weight` |
+
+`vio_dpu_cfg_seq` 先准备实际 ring 并调用 `set_queues()`，随后继承的
+`dpu_cfg_seq.configure_qsch()` 读取以上记录，经 `pcie_tl_reg_seq` 写管理 BAR。
+用户沿用已有 `dut_config` 注册/启动方式即可，env/base_test 不需要重复传 net/group。
+管理 BAR 由 `dpu.qsch.reg_target`（默认继承 `dpu.reg_target`）选择，不由 net_id 推导。
+
+AUTO/RANDOM 当前支持 VNET (`dpu.qsch.mode=0`)；原
+`net_base/net_stride/group_id/eth_ports/ets` 策略使用 `DPU_QSCH_MANUAL`。
+运行期参数重载需先释放已有 VIO 队列，随后重新启动配置 seq 才会生成/下发新拓扑；
+重载不自动修改正在工作的 DUT，也不重新分配 Host/PF/VF/BAR。
+
+用户集成可以使用 `dpu_cfg`、`dpu_dev_cfg`、`dpu_dev_snap`、`dpu_res_snap`、
+`dpu_res_mgr`、`dpu_dev_env`、`dpu_bars` 和 `dpu_caps` 这些对象短别名；
+`dpu_func_key_t`、`dpu_svc_key_t`、`dpu_pcie_id_t`、`dpu_host_t`、
+`dpu_bar_lease_t` 是常用身份/资源值别名，`dpu_scope`、`dpu_table_t`、
+`dpu_layout_t` 是公共表选择别名，`dpu_vtx_t`、`dpu_vrx_t`、`dpu_notify_t`、
+`dpu_q2tc_t`、`dpu_n2g_t`、`dpu_g2p_t` 是硬件 packed 表项别名。完整类名和
+完整类型名继续保留给已有测试和底层实现。
+
+新增声明遵循统一排版：类型名与变量名之间至少使用一个制表位。例如：
+
+```systemverilog
+dpu_cfg		cfg;
+dpu_dev_snap	snapshot;
+dpu_func_key_t	key;
+```
+
 VIO Notify 查找基址默认来自实际队列导出的 `notify_address[60:7]`；显式 BAR/offset
 覆盖需与该地址高位一致。公共 `publish()` 要求 device/resource/BAR map 同源且已冻结，
 消息和分组检查全部成功后才发布，失败保留原有可见状态。
 
-旧 DUT bootstrap/VIO 双 bank builder 已删除。通用 `dpu_reg_plan`、executor 和
-orchestrator 仍可使用；调用方在资源解析后显式调用
-`executor.bind_topology(device_env.get_snapshot())`，不再由资源 env 隐含执行。
+旧 DUT bootstrap/VIO 双 bank builder 和通用寄存器计划执行链已删除。
+当前配置统一由 `dpu_cfg_seq` 直接通过 PCIe TL 写入，资源 env 只负责冻结并发布
+快照，不再保留第二套寄存器执行入口。
 
 ## 所有权边界
 
 本仓库负责：
 
 - Host、PCIe domain、PF/VF 和 service 的逻辑声明；
-- BDF、BAR aperture/base、资源放置和寄存器计划解析；
+- BDF、BAR aperture/base、资源放置和硬件表项解析；
 - 解析完成后的不可变 `dpu_device_snapshot` 与资源快照。
 
 PCIe RC/EP/Switch 角色、Root 编号、USP/DSP、lane/Gen、Serial/PIPE、TL
@@ -102,7 +189,7 @@ AIP 不提供 `dpu` 到 `dpu.h0` 的层级继承。推荐顺序如下：
 3. 深复制模板到各 Host，设置其拓扑身份，再调用
    `host.load_params($sformatf("dpu.h%0d", host.host_id))`。
 4. 建立 placement 的 profiles/requests，调用
-   `placement.load_params("dpu")`；如需独立 QSCH topology generator，再显式加载它。
+   `placement.load_params("dpu")`；QSCH 拓扑由 `dpu_env_cfg` 根据冻结资源和实际队列统一生成。
 5. 执行跨对象的整体校验与解析，成功后发布冻结快照。
 
 每次显式调用都可能消费随机参数，因此不要对同一个模板或实例重复加载。
@@ -125,7 +212,6 @@ AIP 不提供 `dpu` 到 `dpu.h0` 的层级继承。推荐顺序如下：
 | `dpu_vio_candidate_filter` / `dpu` | `host_ids/vf_ids/parent_pfs/functions` → host_ids/vf_ids/parent_pf_keys/function_keys |
 | `dpu_vio_device_constraint` / `dpu.device` | `host/pf/kind/vf/mode/qpairs`；request 对既有对象使用 `.deviceN` |
 | `dpu_vio_qpair_override` / `dpu.pair` | `index/owner_mode/owner_host/owner_pf/owner_kind/owner_vf/local_mode/local_id/global_mode/global_id`；request 对既有对象使用 `.pairN` |
-| `dpu_qsch_topology_generator` / `dpu.qsch` | `mode/max_groups/max_ports/max_tc/shared_group/include_af` |
 | `dpu_dut_caps` / `dpu.caps` | `max_hosts/max_pfs_per_host/max_vfs_per_pf/max_functions/global_msix_vector_count/mailbox_msix_vectors/af_extra_msix_vectors/af_extra_queue_count/vio_global_qpair_count/max_vio_net_qpairs_per_device/vio_notify_entries_per_bank` |
 
 当前公共写表不注册旧 `dpu.notify.bank/auto_bank/full_bank` 参数，Notify 仅单 bank。
