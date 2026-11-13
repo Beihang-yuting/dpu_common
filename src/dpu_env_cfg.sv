@@ -227,7 +227,9 @@ class dpu_env_cfg extends uvm_object;
 	// 控制 payload/mask 只来自已冻结 catalog，不把未定义位扩展成全可写。
 	extern function logic [127:0] platform_control_mask(input dpu_table_item_t	record);
 
-	// 公共类别只消费冻结 Function/消息/布局；缺失映射只阻止当前类别，不依赖 VIO ring。
+	// 功能：按 kind/scope 从冻结 Function、消息和布局生成公共表记录，RDMA Notify 同时接受 PF/VF。
+	// 输入输出及副作用：selected 返回所选记录，why 返回失败原因；可建立 MSI-X 目录缓存，不访问 DUT。
+	// 失败边界：空/异源 scope、缺映射/布局/控制项、拆分 BAR 组或字段/索引越界时返回假，不依赖 VIO ring。
 	extern function bit public_records(
 		input dpu_table_kind_e	kind,
 		input dpu_cfg_scope		scope,
@@ -2146,7 +2148,9 @@ function logic [127:0] dpu_env_cfg::platform_control_mask(input dpu_table_item_t
 	return 0;
 endfunction
 
-// 公共类别只消费冻结 Function/消息/布局；缺失映射只阻止当前类别，不依赖 VIO ring。
+// 功能：按 kind/scope 从冻结 Function、消息和布局生成公共表记录，RDMA Notify 同时接受 PF/VF。
+// 输入输出及副作用：selected 返回所选记录，why 返回失败原因；可建立 MSI-X 目录缓存，不访问 DUT。
+// 失败边界：空/异源 scope、缺映射/布局/控制项、拆分 BAR 组或字段/索引越界时返回假，不依赖 VIO ring。
 function bit dpu_env_cfg::public_records(
 	input dpu_table_kind_e	kind,
 	input dpu_cfg_scope		scope,
@@ -2282,10 +2286,11 @@ function bit dpu_env_cfg::public_records(
 			if (kind == DPU_TABLE_RDMA_NOTIFY) begin
 				dpu_rdma_notify_entry_t	e;
 
+				// owner 已由 control_consumers 核对冻结拓扑；表中的 vf_id 是 RDMA Function ID，不能据此排除 PF。
 				e = dpu_rdma_notify_entry_t'(r.entry);
 				if (r.entry[127:64] != 0 || e.reserved_63_59 != 0 || e.host_id != r.owner.host_id ||
-					r.owner.kind != DPU_FUNCTION_VF || r.ctx.table_index >= 256) begin
-					why = "RDMA notify reserved/Host/VF/index encoding invalid";
+					r.ctx.table_index >= 256) begin
+					why = "RDMA notify reserved/Host/index encoding invalid";
 					return 0;
 				end
 			end
